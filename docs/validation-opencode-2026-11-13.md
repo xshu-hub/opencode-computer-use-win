@@ -46,6 +46,8 @@ The reference all-suite runner also causes timeouts in the temporary PowerShell 
 
 ## Reproduction
 
+The dependency lock uses only the public npm registry. A clean isolated `npm ci --ignore-scripts --registry=https://registry.npmjs.org --userconfig=NUL --no-audit --no-fund` completed successfully without local registry credentials. CI also selects the public registry explicitly.
+
 ```powershell
 npm ci --ignore-scripts
 npm run build

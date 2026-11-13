@@ -14,6 +14,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          registry-url: https://registry.npmjs.org
       - name: Install development dependencies
         run: npm ci --ignore-scripts
       - name: Build reference settings extension
