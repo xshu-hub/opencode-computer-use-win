@@ -2,6 +2,15 @@
 
 ## 获取安装包
 
+推荐从公共 npm 注册表安装：
+
+~~~powershell
+npm install --global opencode-computer-use-win@0.1.3 --registry=https://registry.npmjs.org
+npm root --global
+~~~
+
+安装完成后按下文获取入口并配置。也可以使用构建产出的 tgz：
+
 在仓库 Actions 页面打开成功的 OpenCode Windows plugin 构建，下载 opencode-computer-use-win artifact。解压外层 artifact 后可得到 opencode-computer-use-win-VERSION.tgz。
 
 ~~~powershell

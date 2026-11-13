@@ -13,7 +13,14 @@
 
 ## 安装
 
-从 [GitHub Actions](https://github.com/xshu-hub/opencode-computer-use-win/actions) 成功构建的 opencode-computer-use-win artifact 下载并解压 tgz，然后在 PowerShell 执行：
+通过 [npm](https://www.npmjs.com/package/opencode-computer-use-win) 全局安装，在 PowerShell 执行：
+
+~~~powershell
+npm install --global opencode-computer-use-win@0.1.3 --registry=https://registry.npmjs.org
+npm root --global
+~~~
+
+也可从 [GitHub Actions](https://github.com/xshu-hub/opencode-computer-use-win/actions) 成功构建的 opencode-computer-use-win artifact 下载并解压 tgz，离线包安装命令为：
 
 ~~~powershell
 npm install --global --omit=dev --ignore-scripts .\opencode-computer-use-win-0.1.3.tgz
@@ -30,7 +37,7 @@ npm run build
 npm pack
 ~~~
 
-本项目尚未发布到 npm 注册表。安装使用构建产出的本地 tgz，而非从注册表搜索同名包。
+npm 与 tgz 安装使用相同的全局配置方式，见下文。
 
 ## 全局配置
 

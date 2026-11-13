@@ -6,7 +6,14 @@ Requires Windows, Node.js 22+ and OpenCode V1 (tested with 1.18.0). OpenCode V2 
 
 ## Install and configure
 
-Download and extract the tgz from a successful [GitHub Actions artifact](https://github.com/xshu-hub/opencode-computer-use-win/actions), then run:
+Install globally from [npm](https://www.npmjs.com/package/opencode-computer-use-win):
+
+~~~powershell
+npm install --global opencode-computer-use-win@0.1.3 --registry=https://registry.npmjs.org
+npm root --global
+~~~
+
+Alternatively, download and extract the tgz from a successful [GitHub Actions artifact](https://github.com/xshu-hub/opencode-computer-use-win/actions), then run:
 
 ~~~powershell
 npm install --global --omit=dev --ignore-scripts .\opencode-computer-use-win-0.1.3.tgz
@@ -28,7 +35,7 @@ node test/run-opencode-host.mjs C:/path/to/opencode.exe
 npm pack
 ~~~
 
-CI builds and uploads an installable tarball; this project is not published to the npm registry. See [README.md](README.md), [installation details](docs/global-installation.md) and [validation](docs/validation-opencode-2026-11-13.md).
+CI builds and uploads an installable tarball. npm publication is a separate authenticated step. See [README.md](README.md), [installation details](docs/global-installation.md) and [validation](docs/validation-opencode-2026-11-13.md).
 
 OpenCode V1 has no Desktop GUI settings-page plugin API, so settings open in a local browser window. Conversation tool/image rendering remains in OpenCode. A recording-exclusion regression reproduces in both the adapter and reference backend in the validation environment; the complete upstream suite is not claimed passing.
 
