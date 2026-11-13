@@ -14,7 +14,7 @@ await mkdir(path.join(root, 'scripts'));
 const serverPath = path.join(root, 'mcp/server.mjs');
 const server = await readFile(serverPath, 'utf8');
 await writeFile(serverPath, server.replace('function runBackend(action, args = {}, timeoutMs = 30000, request) {',
-  'function runBackend(action, args = {}, timeoutMs = 30000, request) { timeoutMs = Math.min(timeoutMs, 1400);'));
+  'function runBackend(action, args = {}, timeoutMs = 30000, request) { if (action === "find" && args.query === "timeout") timeoutMs = Math.min(timeoutMs, 1400);'));
 // A PNG with trailing bytes makes a large, deterministic transport fixture.
 const png = Buffer.concat([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=', 'base64'), Buffer.alloc(2 * 1024 * 1024, 0x5a)]);
 const image = path.join(root, 'fixture.png');

@@ -44,7 +44,7 @@ async function clientCase(label, test, extra = {}) {
 const batch = (client, steps, extra = {}) => client.call('windows_computer_use_batch', { nativeWindowHandle: 101, steps, ...extra });
 await clientCase('complete', async (client, marker) => {
   const result = await batch(client, [step('one'), step('two'), step('three')]);
-  assert.equal(result.isError, undefined); assert.equal(data(result).completed, 3);
+  assert.equal(result.isError, undefined, JSON.stringify(result)); assert.equal(data(result).completed, 3);
   assert.equal(result.content.filter(block => block.text === 'Final observation:').length, 1);
   assert.equal((await readFile(marker, 'utf8')).trim().split('\n').length, 3);
 });

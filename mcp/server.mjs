@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { TakeoverControl, STOPPED, IN_WSL, linuxPath, windowsEnv, windowsScript } from './takeover.mjs';
 import { TOOL_NAMES, normalizeEnabledTools, browserRoutingInstructions } from './settings.mjs';
 import { BrowserLane, isBrowserCall, isQuietCall, BACKGROUND_FIRST } from './browser.mjs';
+import { verifyCall } from './request-context.mjs';
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -603,7 +604,7 @@ const capabilityInstructions = 'Windows Computer Use reads and operates real Win
 // enabling one is refused, and saying otherwise contradicts the user's setting.
 const managementOnly = initialNames.length === 1 && initialNames[0] === discoveryName
   && [...allowedTools].some(name => name !== discoveryName);
-const routingInstructions = browserRoutingInstructions(process.env.WCU_SETTINGS_JSON ? JSON.parse(process.env.WCU_SETTINGS_JSON) : {}, [...allowedTools].map(name => name.slice(prefix.length)));
+const routingInstructions = browserRoutingInstructions(process.env.WCU_SETTINGS_JSON ? JSON.parse(process.env.WCU_SETTINGS_JSON) : {}, [...allowedTools].map(name => name.slice(prefix.length))).replaceAll('DSH', process.env.WCU_HOST_BRAND || 'DSH');
 const serverInstructions = [...allowedTools].some(name => name !== discoveryName)
   ? (managementOnly ? capabilityInstructions + '\n\n' : '') + routingInstructions : undefined;
 // Saved settings the DSH adapter reset to their defaults (dsh-plugin.mjs)
@@ -1250,6 +1251,10 @@ async function handleRequest(message) {
     return null;
   }
   if (method === "initialize") {
+    // The managed host allows a longer startup budget. Load Windows/.NET once
+    // here so a cold PowerShell does not consume the first window query's
+    // shorter execution timeout. This short wait never sends desktop input.
+    if (process.env.WCU_OPENCODE_TOKEN) void runBackend('wait', { milliseconds: 1 }, 45000).catch(error => process.stderr.write(`[wcu-startup] ${error.message}\n`));
     return {
       jsonrpc: "2.0",
       id,
@@ -1277,7 +1282,14 @@ async function handleRequest(message) {
     const request = { proc: null };
     pendingToolCalls.set(id, request);
     try {
-      const result = await callTool(params?.name, params?.arguments === undefined ? {} : params.arguments, request);
+      const { args, context } = verifyCall(process.env.WCU_OPENCODE_TOKEN, params?.name, params?.arguments === undefined ? {} : params.arguments);
+      if (context && !['windows_computer_use_health', 'windows_computer_use_tools'].includes(params?.name)) {
+        await takeover.sync();
+        if (!takeover.seriesHeld || takeover.seriesKey !== JSON.stringify([context.sessionId, context.turn])) {
+          throw Error('OPENCODE_SERIES_MISMATCH: This call does not own the active desktop operation series');
+        }
+      }
+      const result = await callTool(params?.name, args, request);
       if (request.cancelled && !request.batchResult) return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: request.takeoverError || "COMPUTER_USE_CANCELLED_AFTER_CURRENT_ACTION" }] } };
       return { jsonrpc: "2.0", id, result };
     } catch (error) {

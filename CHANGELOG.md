@@ -1,3 +1,28 @@
+# OpenCode adapter changes
+
+## 0.1.3
+
+- Fix AI progress summaries keeping the previous interface language after switching languages.
+- Prepare public repository metadata, portable installation documentation and Windows CI build artifacts.
+- Retain the single TUI settings command and omit the upstream promotion/feedback banner.
+
+## 0.1.2
+
+- Remove the upstream reference and feedback bar from the settings page; keep attribution in repository documentation.
+
+## 0.1.1
+
+- Register /computer-use only in the TUI, eliminating duplicate completion rows and model requests for opening settings.
+
+## 0.1.0
+
+- Adapt the reference Windows/browser MCP backend and settings controls to OpenCode V1.
+- Add signed session/turn context, cross-project desktop ownership, cancellation, progress and global settings entrypoints.
+
+---
+
+# Upstream DSH history
+
 # Changelog
 
 ## 0.5.7 — 2026-11-11

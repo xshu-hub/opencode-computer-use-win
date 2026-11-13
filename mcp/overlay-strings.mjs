@@ -3,6 +3,7 @@
 // here, so a language is added by adding one dictionary with the same keys.
 // {0}, {1} are filled in order; an unknown language reads English.
 const zh = {
+  hostName: 'DSH',
   // Takeover banner.
   indicatorDefault: 'DSH 正在控制电脑',
   stopHint: '停止',
@@ -72,6 +73,7 @@ const zh = {
 };
 
 const en = {
+  hostName: 'DSH',
   indicatorDefault: 'DSH is controlling your computer',
   stopHint: 'Stop',
   headerWorking: 'DSH · Step {0} · {1}',
@@ -142,7 +144,14 @@ export function overlayLocale(tag) {
   const language = String(tag ?? '').trim().toLowerCase().split(/[-_]/)[0];
   return Object.hasOwn(OVERLAY_STRINGS, language) ? language : 'en';
 }
-export const overlayStrings = locale => OVERLAY_STRINGS[overlayLocale(locale)];
+const branded = new Map();
+export const overlayStrings = locale => {
+  const table = OVERLAY_STRINGS[overlayLocale(locale)], brand = process.env.WCU_HOST_BRAND;
+  if (!brand || brand === 'DSH') return table;
+  const key = overlayLocale(locale) + ':' + brand;
+  if (!branded.has(key)) branded.set(key, freeze(Object.fromEntries(Object.entries(table).map(([key, value]) => [key, typeof value === 'string' ? value.replaceAll('DSH', brand) : value]))));
+  return branded.get(key);
+};
 // The language Node itself runs in. On Windows it is the regional format,
 // which is also what DSH Desktop's Chromium starts with (--lang) when the user
 // has not chosen a DSH language.
@@ -156,13 +165,13 @@ export function formatText(template, ...values) {
 // The banner shows the user's own words, or the built-in default in the
 // current language: an unchanged default follows the language.
 const DEFAULT_INDICATOR_TEXTS = new Set(Object.values(OVERLAY_STRINGS).map(table => table.indicatorDefault));
-export const isDefaultIndicatorText = text => !String(text ?? '').trim() || DEFAULT_INDICATOR_TEXTS.has(String(text).trim());
+export const isDefaultIndicatorText = text => !String(text ?? '').trim() || DEFAULT_INDICATOR_TEXTS.has(String(text).trim()) || ['OpenCode 正在控制电脑','OpenCode is controlling your computer'].includes(String(text).trim());
 export function indicatorText(text, locale) {
   return isDefaultIndicatorText(text) ? overlayStrings(locale).indicatorDefault : text;
 }
 
 // The words the C# helper draws itself; it receives them with every command.
-export const HELPER_KEYS = Object.freeze(['indicatorDefault', 'stopHint', 'headerWorking', 'headerDone', 'headerDoneOne', 'headerFailed', 'headerStopped', 'took',
+export const HELPER_KEYS = Object.freeze(['hostName', 'indicatorDefault', 'stopHint', 'headerWorking', 'headerDone', 'headerDoneOne', 'headerFailed', 'headerStopped', 'took',
   'statusThinking', 'statusActing', 'statusReplying', 'statusStopped', 'statusWorking', 'stepHeading', 'stepActions', 'listSeparator', 'actionError',
   'summaryResult', 'summaryStep', 'summaryUnavailable', 'summarizingResult', 'summarizing', 'thinkingHeading', 'replyHeading', 'waiting',
   'image', 'imageNamed', 'hintUnlocked', 'hintAdjust']);

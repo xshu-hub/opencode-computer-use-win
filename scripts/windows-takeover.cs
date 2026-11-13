@@ -974,7 +974,8 @@ namespace DshTakeover {
         // A solid name tag just past the arrow, like collaborative cursors.
         using(var font=new Font("Segoe UI",10,FontStyle.Bold,GraphicsUnit.Pixel))
         using(var format=new StringFormat(StringFormat.GenericTypographic) { Alignment=StringAlignment.Center, LineAlignment=StringAlignment.Center }) {
-          float w=(float)Math.Ceiling(g.MeasureString("DSH",font,PointF.Empty,format).Width)+14,h=19;
+          string hostName=Words.Get("hostName");
+          float w=(float)Math.Ceiling(g.MeasureString(hostName,font,PointF.Empty,format).Width)+14,h=19;
           // Below-right clears the pointer's whole extent; the other corners only need to clear the tip.
           float bx=left?x-8-w:up?x+13:x+TagX(extent),by=up?y-10-h:left?y+17:y+TagY(extent);
           using(var shadow=Frame.Rounded(new RectangleF(bx,by+1.5f,w,h),6)) using(var brush=new SolidBrush(Color.FromArgb(60,0,0,0))) g.FillPath(brush,shadow);
@@ -982,7 +983,7 @@ namespace DshTakeover {
             using(var fill=new SolidBrush(Color.FromArgb(255,57,100,254)))g.FillPath(fill,shape);
             using(var outline=new Pen(Color.FromArgb(240,255,255,255),1.25f))g.DrawPath(outline,shape);
           }
-          using(var brush=new SolidBrush(Color.White))g.DrawString("DSH",font,brush,new RectangleF(bx,by+.5f,w,h),format);
+          using(var brush=new SolidBrush(Color.White))g.DrawString(hostName,font,brush,new RectangleF(bx,by+.5f,w,h),format);
         }
       }
       return image;

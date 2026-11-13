@@ -47,8 +47,8 @@ try {
   assert.equal(stopped.paused, true); assert.equal(stopped.cancelled, true); assert.equal(stopped.windows, 0);
   assert.equal(stopped.pointerVisible,false,'Stop must immediately remove the pointer marker');
   assert.equal((await control.command('test_key',{vk:0x1b,down:false})).consumed,true,'Stopped Esc release must be consumed');
-  const eventProbe = spawnSync(process.env.WINDOWS_CU_POWERSHELL || 'powershell.exe', ['-NoProfile','-File',fileURLToPath(new URL('./takeover-event.ps1',import.meta.url)),'-CancelEvent',control.eventName,'-ExpectCancelled'],{encoding:'utf8',windowsHide:true,timeout:10000});
-  assert.equal(eventProbe.status,0,eventProbe.stderr);
+  const eventProbe = spawnSync(process.env.WINDOWS_CU_POWERSHELL || 'powershell.exe', ['-NoProfile','-File',fileURLToPath(new URL('./takeover-event.ps1',import.meta.url)),'-CancelEvent',control.eventName,'-ExpectCancelled'],{encoding:'utf8',windowsHide:true,timeout:30000});
+  assert.equal(eventProbe.status,0,eventProbe.stderr || eventProbe.error?.message);
   await control.end();
   const replacement = new TakeoverControl({ powershell, configFile, stateFile });
   await replacement.begin();

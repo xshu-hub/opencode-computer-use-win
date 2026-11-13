@@ -13,8 +13,14 @@ Thumbs.db
 .secrets/
 *.token
 .env
+.env.*
+!.env.example
 
 # Local navigation and observation history
 FILE_LOG.md
 FILE_INDEX.json
 FILE_HISTORY.jsonl
+
+dist/
+.work/
+*.tgz

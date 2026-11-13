@@ -113,7 +113,7 @@ export class TakeoverControl {
     }
   }
   persist(reason) {
-    atomicJson(this.stateFile, { paused: this.paused, active: this.active, seriesActive:this.seriesHeld,reason: reason ?? null,
+    atomicJson(this.stateFile, { workerPid: process.pid, paused: this.paused, active: this.active, seriesActive:this.seriesHeld,reason: reason ?? null,
       resumeToken: this.resumeToken,stoppedSeriesKey:this.stoppedSeriesKey,blockedSeries:Object.fromEntries(this.blockedSeries),pauseMessage: this.paused ? this.pauseMessage : null, updatedAt: new Date().toISOString() });
   }
   async resumeOperation(clearScope=true){

@@ -41,3 +41,9 @@
 
 按 MIT 许可，以上衍生与再分发均被允许；本项目保留双方版权声明
 （见 LICENSE）。
+
+## OpenCode adaptation
+
+This checkout derives from Yu-tao-Li/dsh-computer-use-win 0.5.7, commit e136fcb87b2eb88d7192531b7ab941b475482ec6 (MIT). The Windows/browser backend, takeover helper and settings UI retain their upstream copyright and license. The OpenCode adapter is under opencode/. Reference READMEs are preserved under docs/reference/. No affiliation with or endorsement by the original author or OpenCode is implied.
+
+The standalone settings window bundles React, React DOM and Scheduler under their MIT licenses. The build includes their complete license texts in dist/THIRD_PARTY_LICENSES.txt.
