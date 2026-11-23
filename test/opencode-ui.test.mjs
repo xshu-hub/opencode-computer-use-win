@@ -10,7 +10,11 @@ test('reference settings UI saves tool selection, shortcut, overlay and browser 
   const { chromium }=await import('playwright');
   const home=await mkdtemp(path.join(os.tmpdir(),'opencode-cu-ui-')),store=new SettingsStore(home);
   let locale='zh';
-  const server=await createSettingsServer({store,onChange:()=>{},onLocale:next=>{locale=next;},getStatus:()=>({active:false,locale})});
+  let approvals=[],configured=0,approved=false;
+  const server=await createSettingsServer({store,onChange:()=>{},onLocale:next=>{locale=next;},
+    onUpdate:()=>({version:'0.2.0',latest:'0.2.1'}),onDiagnostics:()=> 'Owned diagnostics fixture; no conversation or screenshots.',
+    onHyperv:()=>{configured++;return {ok:true};},onApproval:(id,allow)=>{assert.equal(id,'owned-approval');approved=allow;approvals=[];},
+    getStatus:()=>({active:false,locale,approvals})});
   const browser=await chromium.launch({channel:'msedge',headless:true});
   t.after(async()=>{await browser.close();await server.close();await rm(home,{recursive:true,force:true});});
   const context=await browser.newContext({locale:'zh-CN',viewport:{width:1280,height:1000}}), page=await context.newPage(), errors=[];
@@ -18,6 +22,26 @@ test('reference settings UI saves tool selection, shortcut, overlay and browser 
   await page.goto(server.url);
   await page.locator('[data-wincu-settings]').waitFor();
   assert.equal(await page.locator('[data-wincu-tool]').count(),26);
+  assert.equal(await page.locator('[data-wincu-community]').count(),0);
+  assert.equal(await page.locator('[data-wincu-version]').innerText(),'v0.2.0');
+  await page.locator('label').filter({has:page.locator('#opencode-cu-desktopTarget-fast')}).click();
+  await page.getByRole('button',{name:'保存更改',exact:true}).click();
+  await page.getByText('已保存',{exact:true}).waitFor();assert.equal((await store.snapshot()).value.desktopTarget,'fast');
+  await page.locator('label').filter({has:page.locator('#opencode-cu-desktopTarget-hyperv')}).click();
+  await page.locator('#opencode-cu-hypervVm').fill('Owned VM');
+  await page.getByRole('button',{name:'保存更改',exact:true}).click();
+  await page.getByText('已保存',{exact:true}).waitFor();assert.equal((await store.snapshot()).value.hypervVm,'Owned VM');
+  await page.getByRole('button',{name:'配置连接',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('.wcu-hyperv-action button')?.disabled);assert.equal(configured,1);
+  await page.locator('label').filter({has:page.locator('#opencode-cu-desktopTarget-quiet')}).click();
+  await page.getByRole('button',{name:'保存更改',exact:true}).click();await page.getByText('已保存',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'检查更新',exact:true}).click();await page.locator('[data-update-result]').waitFor();
+  assert.match(await page.locator('[data-update-result]').innerText(),/0\.2\.1/);
+  const downloading=page.waitForEvent('download');await page.getByRole('button',{name:'下载诊断',exact:true}).click();
+  assert.equal((await downloading).suggestedFilename(),'opencode-computer-use-diagnostics.txt');
+  approvals=[{id:'owned-approval',reason:'Owned sensitive operation fixture'}];
+  await page.getByRole('alertdialog').waitFor();await page.getByRole('button',{name:'允许这一次',exact:true}).click();
+  await page.getByRole('alertdialog').waitFor({state:'detached'});assert.equal(approved,true);
   await page.locator('label').filter({has:page.locator('#opencode-cu-toolPreset-lazy')}).click();
   await page.getByRole('button',{name:'保存更改',exact:true}).click();
   await page.getByText('已保存',{exact:true}).waitFor();assert.equal((await store.snapshot()).value.toolPreset,'lazy');

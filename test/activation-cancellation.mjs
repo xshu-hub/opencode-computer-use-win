@@ -1,6 +1,6 @@
 // Exercise cancellation of reads that can activate a window, without user32/input.
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import {cp, access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,12 +9,11 @@ import { McpTestClient } from './mcp-test-client.mjs';
 const root = await mkdtemp(path.join(os.tmpdir(), 'wcu-activation-test-'));
 await mkdir(path.join(root, 'mcp'));
 await mkdir(path.join(root, 'scripts'));
-await writeFile(path.join(root, 'mcp/server.mjs'), await readFile(new URL('../mcp/server.mjs', import.meta.url)));
-for(const file of ['settings.mjs','takeover.mjs','overlay-strings.mjs','browser.mjs'])await writeFile(path.join(root,'mcp',file),await readFile(new URL('../mcp/'+file,import.meta.url)));
+await cp(new URL('../mcp',import.meta.url),path.join(root,'mcp'),{recursive:true});
 const fixturePath = root.replaceAll("'", "''");
 await writeFile(path.join(root, 'scripts/windows-uia.ps1'), `
 param([switch]$Persistent)
-while ($null -ne ($line = [Console]::In.ReadLine())) {
+[Console]::WriteLine((@{type='ready';protocol=1;pid=$PID}|ConvertTo-Json -Compress));while ($null -ne ($line = [Console]::In.ReadLine())) {
   $r = $line | ConvertFrom-Json
   if ($r.args.activate) {
     [IO.File]::WriteAllText((Join-Path '${fixturePath}' ($r.action + '.started')), 'started')
@@ -25,7 +24,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 }
 `);
 const client = new McpTestClient(process.execPath, [path.join(root, 'mcp/server.mjs')], {
-  env: { ...process.env, WINDOWS_CU_POWERSHELL: process.env.WINDOWS_CU_POWERSHELL || 'powershell.exe' }
+  env: { ...process.env, NODE_ENV: 'test', WCU_TEST_NO_TAKEOVER: '1', WCU_INDICATOR: '0', WINDOWS_CU_POWERSHELL: process.env.WINDOWS_CU_POWERSHELL || 'powershell.exe' }
 });
 const call = (tool, args = {}) => client.request('tools/call', { name: 'windows_computer_use_' + tool, arguments: args });
 const exists = file => access(file).then(() => true, () => false);

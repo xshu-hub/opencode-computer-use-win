@@ -5,6 +5,8 @@
 )
 
 $ErrorActionPreference = "Stop"
+$loader = Join-Path $PSScriptRoot 'native-loader.ps1'
+if ([IO.File]::Exists($loader)) { . $loader }
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $script:BackendStartupWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -27,11 +29,6 @@ function Write-BackendStage {
 #                alive so repeated actions skip PowerShell startup, assembly
 #                loading and C# compilation)
 # ============================================================================
-
-function Write-JsonLine {
-  param([object]$Value)
-  $Value | ConvertTo-Json -Depth 50 -Compress
-}
 
 function Get-InputObject {
   $raw = [Console]::In.ReadToEnd()
@@ -76,7 +73,7 @@ function Get-DetailLevel {
 }
 
 function Get-ViewCondition {
-  param([string]$ViewMode = "control", [bool]$IncludeOffscreen = $false)
+  param([string]$ViewMode = "control", [bool]$IncludeOffscreen = $false, [switch]$SkipOffscreenFilter)
   $condition = switch ($ViewMode) {
       "raw" { [System.Windows.Automation.Automation]::RawViewCondition }
       "content" { [System.Windows.Automation.Automation]::ContentViewCondition }
@@ -85,7 +82,7 @@ function Get-ViewCondition {
   if ($null -eq $condition) {
     $condition = [System.Windows.Automation.Condition]::TrueCondition
   }
-  if (-not $IncludeOffscreen) {
+  if (-not $IncludeOffscreen -and -not $SkipOffscreenFilter) {
     $visible = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::IsOffscreenProperty), $false
     $condition = New-Object System.Windows.Automation.AndCondition -ArgumentList $condition, $visible
   }
@@ -101,14 +98,179 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class WindowsComputerUseNative {
+  // Shared with the stop listener. Remote-control input without this marker
+  // remains eligible for Esc / the configured stop shortcut.
+  public static readonly uint InputMarker = ParseInputMarker();
+  private static uint ParseInputMarker() {
+    string raw = Environment.GetEnvironmentVariable("WCU_INPUT_MARKER");
+    if (!String.IsNullOrEmpty(raw)) {
+      string s = raw.Trim();
+      uint parsed;
+      if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+        if (uint.TryParse(s.Substring(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out parsed) && parsed != 0u) return parsed;
+      } else if (uint.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out parsed) && parsed != 0u) return parsed;
+    }
+    return 0x44534857u;
+  }
+  [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+  [DllImport("user32.dll")] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint desiredAccess);
+  [DllImport("user32.dll")] private static extern bool CloseDesktop(IntPtr desktop);
+  public static bool IsInputDesktopAvailable() {
+    IntPtr d = OpenInputDesktop(0, false, 0x0100u);
+    if (d == IntPtr.Zero) return false;
+    CloseDesktop(d);
+    return true;
+  }
+
+  private const uint ProcessQueryLimitedInformation = 0x1000, TokenQuery = 0x0008;
+  private const uint StillActive = 259;
+  private const int TokenIntegrityLevel = 25, ErrorInvalidParameter = 87, ErrorInsufficientBuffer = 122;
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll")] private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, System.Text.StringBuilder path, ref uint length);
+  [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, uint length, out uint required);
+
+  public sealed class InputProcessIdentity {
+    public bool Gone;
+    public string ImagePath;
+    public uint? Integrity;
+    public bool TokenAccessDenied;
+  }
+
+  private static string GetImagePath(IntPtr process) {
+    uint size = 512;
+    var path = new System.Text.StringBuilder((int)size);
+    if (QueryFullProcessImageNameW(process, 0, path, ref size)) return path.ToString();
+    if (Marshal.GetLastWin32Error() != ErrorInsufficientBuffer) return null;
+    size = 32768;
+    path = new System.Text.StringBuilder((int)size);
+    return QueryFullProcessImageNameW(process, 0, path, ref size) ? path.ToString() : null;
+  }
+
+  private static uint? GetProcessIntegrity(IntPtr process, out bool tokenAccessDenied) {
+    tokenAccessDenied = false;
+    IntPtr token;
+    if (!OpenProcessToken(process, TokenQuery, out token)) {
+      tokenAccessDenied = Marshal.GetLastWin32Error() == 5;
+      return null;
+    }
+    try {
+      uint size;
+      GetTokenInformation(token, TokenIntegrityLevel, IntPtr.Zero, 0, out size);
+      if (Marshal.GetLastWin32Error() != ErrorInsufficientBuffer || size < IntPtr.Size || size > 4096) return null;
+      IntPtr data = Marshal.AllocHGlobal((int)size);
+      try {
+        if (!GetTokenInformation(token, TokenIntegrityLevel, data, size, out size)) return null;
+        // TOKEN_MANDATORY_LABEL starts with the SID pointer in SID_AND_ATTRIBUTES.
+        IntPtr sid = Marshal.ReadIntPtr(data);
+        if (sid == IntPtr.Zero) return null;
+        string label = new System.Security.Principal.SecurityIdentifier(sid).Value;
+        const string integrityAuthority = "S-1-16-";
+        uint rid;
+        if (!label.StartsWith(integrityAuthority, StringComparison.Ordinal) ||
+            !UInt32.TryParse(label.Substring(integrityAuthority.Length), out rid)) return null;
+        return rid;
+      } finally { Marshal.FreeHGlobal(data); }
+    } finally { CloseHandle(token); }
+  }
+
+  public static uint? ReadCurrentIntegrity() {
+    bool ignored;
+    return GetProcessIntegrity(GetCurrentProcess(), out ignored);
+  }
+
+  public static InputProcessIdentity ReadInputProcess(uint pid, bool checkImage) {
+    // Use a single query-only handle for the image, token and liveness of the
+    // same process. No permission to write to or modify the target is requested.
+    IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
+    if (process == IntPtr.Zero)
+      return new InputProcessIdentity { Gone = Marshal.GetLastWin32Error() == ErrorInvalidParameter };
+    try {
+      var identity = new InputProcessIdentity { ImagePath = checkImage ? GetImagePath(process) : null };
+      identity.Integrity = GetProcessIntegrity(process, out identity.TokenAccessDenied);
+      uint exitCode;
+      if (!GetExitCodeProcess(process, out exitCode)) return new InputProcessIdentity();
+      if (exitCode != StillActive) return new InputProcessIdentity { Gone = true };
+      return identity;
+    } finally { CloseHandle(process); }
+  }
+
+  private static INPUT KeyInput(int key, bool up) {
+    var input = new INPUT(); input.type=1; input.U.ki.wVk=(ushort)key;
+    input.U.ki.dwFlags=(up?2u:0u) | ((key>=0x21&&key<=0x2E)?1u:0u);
+    input.U.ki.dwExtraInfo=new IntPtr((long)(ulong)InputMarker); return input;
+  }
+  public static INPUT[] KeyChordPacket(string[] keys, int heldModifiers) {
+    int modifiers=0, main=0, mainCount=0;
+    foreach(string raw in keys) {
+      string key=(raw??"").Trim().ToLowerInvariant();
+      if(key=="ctrl"||key=="control"){modifiers|=2;continue;}
+      if(key=="alt"||key=="option"){modifiers|=4;continue;}
+      if(key=="shift"){modifiers|=1;continue;}
+      if(key=="win"||key=="windows"||key=="cmd"||key=="meta")throw new ArgumentException("The Windows key is blocked by design.");
+      mainCount++;
+      switch(key) {
+        case "enter":case "return":main=0x0D;break;
+        case "tab":main=9;break;
+        case "esc":case "escape":main=0x1B;break;
+        case "backspace":case "bs":case "bksp":main=8;break;
+        case "delete":case "del":main=0x2E;break;
+        case "home":main=0x24;break;case "end":main=0x23;break;
+        case "pageup":case "pgup":main=0x21;break;case "pagedown":case "pgdn":main=0x22;break;
+        case "up":main=0x26;break;case "down":main=0x28;break;case "left":main=0x25;break;case "right":main=0x27;break;
+        case "space":main=0x20;break;case "insert":case "ins":main=0x2D;break;
+        case "capslock":main=0x14;break;case "numlock":main=0x90;break;case "scrolllock":main=0x91;break;
+        case "pause":case "break":main=0x13;break;case "printscreen":case "prtsc":main=0x2C;break;
+        case "add":main=0x6B;break;case "subtract":main=0x6D;break;case "multiply":main=0x6A;break;case "divide":main=0x6F;break;
+        default:
+          int number;
+          if(key.Length>1&&key[0]=='f'&&int.TryParse(key.Substring(1),out number)&&number>=1&&number<=24)main=0x6F+number;
+          else if(key.Length==1){int mapped=VkKeyScanW(key[0]);if(mapped==-1)throw new ArgumentException("Key cannot be mapped in the active keyboard layout.");main=mapped&255;modifiers|=(mapped>>8)&7;}
+          else throw new ArgumentException("Unsupported key: "+key);
+          break;
+      }
+    }
+    if(mainCount!=1)throw new ArgumentException("Exactly one non-modifier key is required.");
+    if((heldModifiers&~modifiers)!=0)throw new InvalidOperationException("COMPUTER_USE_MODIFIERS_HELD: Release other modifiers before this chord; no input was sent.");
+    var packet=new System.Collections.Generic.List<INPUT>();
+    int[] bits={2,4,1}, codes={0x11,0x12,0x10};
+    for(int i=0;i<bits.Length;i++)if((modifiers&bits[i])!=0&&(heldModifiers&bits[i])==0)packet.Add(KeyInput(codes[i],false));
+    packet.Add(KeyInput(main,false));packet.Add(KeyInput(main,true));
+    for(int i=bits.Length-1;i>=0;i--)if((modifiers&bits[i])!=0&&(heldModifiers&bits[i])==0)packet.Add(KeyInput(codes[i],true));
+    return packet.ToArray();
+  }
+  public static bool SendKeyChord(string[] keys) {
+    int held=0;
+    if((GetAsyncKeyState(0x10)&0x8000)!=0)held|=1;
+    if((GetAsyncKeyState(0x11)&0x8000)!=0)held|=2;
+    if((GetAsyncKeyState(0x12)&0x8000)!=0)held|=4;
+    if((GetAsyncKeyState(0x5B)&0x8000)!=0||(GetAsyncKeyState(0x5C)&0x8000)!=0)held|=8;
+    INPUT[] packet=KeyChordPacket(keys,held);ThrowIfCancelled();
+    uint sent=SendInput((uint)packet.Length,packet,Marshal.SizeOf(typeof(INPUT)));
+    if(sent==(uint)packet.Length)return true;
+    // Undo only our own still-held keys after a partial packet. Never release
+    // modifiers the user was already holding, or replay the accepted prefix.
+    var down=new System.Collections.Generic.List<int>();
+    for(int i=0;i<(int)sent;i++){int vk=packet[i].U.ki.wVk;if((packet[i].U.ki.dwFlags&2)==0)down.Add(vk);else down.Remove(vk);}
+    for(int i=down.Count-1;i>=0;i--)SendInput(1,new[]{KeyInput(down[i],true)},Marshal.SizeOf(typeof(INPUT)));
+    return false;
+  }
   private static System.Threading.EventWaitHandle cancellation;
   private static System.Diagnostics.Process stopListener;
+  private static System.Threading.EventWaitHandle stopReady;
   public static void SetStopListener(int processId) {
+    if (stopListener != null && stopListener.Id == processId) return;
+    if (stopListener != null) stopListener.Dispose();
+    stopListener = null;
     if (processId <= 0) return;
-    if (stopListener == null || stopListener.Id != processId) {
-      if (stopListener != null) stopListener.Dispose();
-      stopListener = System.Diagnostics.Process.GetProcessById(processId);
-    }
+    try { stopListener = System.Diagnostics.Process.GetProcessById(processId); }
+    catch (ArgumentException) { throw new OperationCanceledException("COMPUTER_USE_STOP_LISTENER_UNAVAILABLE"); }
   }
   public static void ThrowIfCancelled() {
     string name = Environment.GetEnvironmentVariable("WCU_CANCEL_EVENT");
@@ -119,6 +281,11 @@ public static class WindowsComputerUseNative {
       catch (System.Threading.WaitHandleCannotBeOpenedException) { throw new OperationCanceledException("COMPUTER_USE_STOP_LISTENER_UNAVAILABLE"); }
     }
     if (cancellation.WaitOne(0)) throw new OperationCanceledException("COMPUTER_USE_STOPPED_BY_USER");
+    string ready=Environment.GetEnvironmentVariable("WCU_READY_EVENT");
+    if(!String.IsNullOrEmpty(ready)){
+      if(stopReady==null)try{stopReady=System.Threading.EventWaitHandle.OpenExisting(ready);}catch(System.Threading.WaitHandleCannotBeOpenedException){throw new OperationCanceledException("COMPUTER_USE_STOP_LISTENER_UNAVAILABLE");}
+      if(!stopReady.WaitOne(0))throw new OperationCanceledException("COMPUTER_USE_STOP_LISTENER_UNAVAILABLE");
+    }
   }
   [DllImport("user32.dll")]
   public static extern IntPtr GetForegroundWindow();
@@ -176,11 +343,41 @@ public static class WindowsComputerUseNative {
     MOUSEINPUT mi = new MOUSEINPUT();
     mi.dx = 0; mi.dy = 0; mi.mouseData = (uint)data;
     mi.dwFlags = flags; // button/wheel only; caller positioned via SetCursorPos
-    mi.time = 0; mi.dwExtraInfo = new IntPtr(0);
+    mi.time = 0; mi.dwExtraInfo = new IntPtr((long)(ulong)InputMarker);
     INPUT[] inputs = new INPUT[1];
     inputs[0].type = 0; // INPUT_MOUSE
     inputs[0].U.mi = mi;
     return SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+  }
+
+  // Absolute coordinates require VIRTUALDESK and pixel-center normalization.
+  // Omitting VIRTUALDESK maps a multi-monitor point to the primary display.
+  public static INPUT[] ClickPacket(int x, int y, int left, int top,
+      int width, int height, uint down, uint up) {
+    if (width <= 0 || height <= 0 || width > 65536 || height > 65536 ||
+        (long)x < left || (long)x >= (long)left + width ||
+        (long)y < top || (long)y >= (long)top + height)
+      throw new ArgumentOutOfRangeException("point", "Point or virtual screen cannot be mapped exactly.");
+    INPUT[] packet = new INPUT[3];
+    packet[0].type = packet[1].type = packet[2].type = 0;
+    packet[0].U.mi.dx = (int)(((2L * ((long)x - left) + 1) * 65536) / (2L * width));
+    packet[0].U.mi.dy = (int)(((2L * ((long)y - top) + 1) * 65536) / (2L * height));
+    packet[0].U.mi.dwFlags = 0x0001 | 0x8000 | 0x4000;
+    packet[1].U.mi.dwFlags = down;
+    packet[2].U.mi.dwFlags = up;
+    for(int i=0;i<packet.Length;i++)packet[i].U.mi.dwExtraInfo=new IntPtr((long)(ulong)InputMarker);
+    return packet;
+  }
+
+  public static uint SendClick(int x, int y, uint down, uint up) {
+    INPUT[] packet = ClickPacket(x, y, GetSystemMetrics(76), GetSystemMetrics(77),
+      GetSystemMetrics(78), GetSystemMetrics(79), down, up);
+    ThrowIfCancelled();
+    uint sent = SendInput(3, packet, Marshal.SizeOf(typeof(INPUT)));
+    // A partial batch can leave the button down. Release it before reporting
+    // failure; never replay the click, which might already have taken effect.
+    if (sent == 2) SendMouseEvent(0, 0, up, 0);
+    return sent;
   }
 
   public const uint KEYEVENTF_UNICODE = 0x0004;
@@ -188,8 +385,8 @@ public static class WindowsComputerUseNative {
   // Synthesize the text as Unicode key events (KEYEVENTF_UNICODE). No clipboard
   // is touched, so this also works on password fields and other controls that
   // reject paste. The target control must be foreground + focused. Returns
-  // false if any input event was dropped (queue full).
-  public static bool SendUnicodeText(string text) {
+  // false if any input event was dropped or the target lost focus.
+  public static bool SendUnicodeText(string text, IntPtr front, IntPtr focus) {
     if (string.IsNullOrEmpty(text)) return true;
     var chars = text.ToCharArray();
     var inputs = new INPUT[chars.Length * 2];
@@ -201,22 +398,25 @@ public static class WindowsComputerUseNative {
       inputs[n].U.ki.wScan = ch;
       inputs[n].U.ki.dwFlags = KEYEVENTF_UNICODE;
       inputs[n].U.ki.time = 0;
-      inputs[n].U.ki.dwExtraInfo = new IntPtr(0);
+      inputs[n].U.ki.dwExtraInfo = new IntPtr((long)(ulong)InputMarker);
       n++;
       // release
       inputs[n].type = 1;
       inputs[n].U.ki.wVk = 0;
-      inputs[n].U.ki.wScan = 0;
+      inputs[n].U.ki.wScan = ch;
       inputs[n].U.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
       inputs[n].U.ki.time = 0;
-      inputs[n].U.ki.dwExtraInfo = new IntPtr(0);
+      inputs[n].U.ki.dwExtraInfo = new IntPtr((long)(ulong)InputMarker);
       n++;
     }
     int sent = 0;
     int size = Marshal.SizeOf(typeof(INPUT));
     while (sent < n) {
       ThrowIfCancelled();
+      if (GetForegroundWindow() != front || FocusedWindow(front) != focus) return false;
       int chunk = Math.Min(64, n - sent);
+      if (sent + chunk < n && Char.IsHighSurrogate(chars[(sent + chunk) / 2 - 1]) &&
+          Char.IsLowSurrogate(chars[(sent + chunk) / 2])) chunk -= 2;
       var slice = new INPUT[chunk];
       Array.Copy(inputs, sent, slice, 0, chunk);
       uint ok = SendInput((uint)chunk, slice, size);
@@ -249,6 +449,35 @@ public static class WindowsComputerUseNative {
     var result = new System.Collections.Generic.List<IntPtr>();
     EnumWindows(delegate(IntPtr hwnd, IntPtr data) { result.Add(hwnd); return true; }, IntPtr.Zero);
     return result.ToArray();
+  }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  struct LaunchStartup {
+    public int Size;
+    public string Reserved, Desktop, Title;
+    public uint X,Y,Width,Height,Columns,Rows,Fill,Flags;
+    public ushort Show,ReservedSize;
+    public IntPtr ReservedData,Input,Output,Error;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct LaunchProcess {
+    public IntPtr Process,Thread;
+    public uint ProcessId,ThreadId;
+  }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern bool CreateProcess(string application, System.Text.StringBuilder command,
+    IntPtr processAttrs, IntPtr threadAttrs, bool inheritHandles, uint flags,
+    IntPtr environment, string directory, ref LaunchStartup startup, out LaunchProcess process);
+  public static uint StartBackgroundProgram(string executable, string arguments, string directory) {
+    var startup = new LaunchStartup { Size=Marshal.SizeOf(typeof(LaunchStartup)) };
+    var command = new System.Text.StringBuilder("\"" + executable + "\" " + arguments);
+    LaunchProcess process;
+    // Inherit the desktop and environment, but never the MCP stdio handles.
+    if (!CreateProcess(executable, command, IntPtr.Zero, IntPtr.Zero, false,
+        0x08000000, IntPtr.Zero, directory, ref startup, out process))
+      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    CloseHandle(process.Thread);
+    CloseHandle(process.Process);
+    return process.ProcessId;
   }
 
   // Chromium hosts (Electron, Chrome/Edge, CEF, WebView2) draw each page in a
@@ -283,7 +512,7 @@ public static class WindowsComputerUseNative {
   public static extern bool SetProcessDPIAware();
 
   [DllImport("user32.dll")]
-  public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
+  public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
 
   [StructLayout(LayoutKind.Sequential)]
   public struct RECT { public int left; public int top; public int right; public int bottom; }
@@ -301,6 +530,7 @@ public static class WindowsComputerUseNative {
   public struct POINT { public int x; public int y; }
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
   [DllImport("user32.dll")]
   public static extern bool GetCursorPos(out POINT p);
 
@@ -356,8 +586,49 @@ public static class WindowsComputerUseNative {
   [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, IntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode, ExactSpelling = true)]
+  private static extern IntPtr ReadMessageText(IntPtr hwnd, uint msg, UIntPtr wParam, System.Text.StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", ExactSpelling = true)]
+  private static extern IntPtr ReadMessageSelection(IntPtr hwnd, uint msg, out uint start, out uint end, uint flags, uint timeout, out UIntPtr result);
   public const uint BM_CLICK = 0x00F5, EM_SETSEL = 0x00B1, EM_REPLACESEL = 0x00C2;
   public const uint WM_GETTEXTLENGTH = 0x000E, WM_HSCROLL = 0x0114, WM_VSCROLL = 0x0115;
+
+  public static string ReadEditText(IntPtr hwnd, int capacity) {
+    var text = new System.Text.StringBuilder(capacity);
+    UIntPtr length;
+    // WM_GETTEXT, with one extra slot to detect a truncated read.
+    if (ReadMessageText(hwnd, 0x000D, new UIntPtr((uint)capacity), text, 3, 100, out length) == IntPtr.Zero ||
+        length.ToUInt64() >= (ulong)(capacity - 1)) return null;
+    return text.ToString();
+  }
+
+  public static int[] ReadEditSelection(IntPtr hwnd) {
+    uint start, end;
+    UIntPtr ignored;
+    // EM_GETSEL writes both UTF-16 offsets. Some superclassed edits do not
+    // populate both offsets in the packed return value.
+    if (ReadMessageSelection(hwnd, 0x00B0, out start, out end, 3, 100, out ignored) == IntPtr.Zero ||
+        start > Int32.MaxValue || end > Int32.MaxValue) return null;
+    return new int[] { (int)start, (int)end };
+  }
+
+  [DllImport("user32.dll")] private static extern bool InvalidateRect(IntPtr hwnd, IntPtr rect, bool erase);
+  [DllImport("user32.dll")] private static extern bool GetUpdateRect(IntPtr hwnd, IntPtr rect, bool erase);
+  [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+
+  // A thread gets WM_PAINT only when no posted message or input is waiting
+  // for it. Request a repaint after queueing input: once the window's update
+  // region is empty again, its thread has taken all of that input. A message
+  // sent to the window cannot tell, since it is handled before queued input.
+  public static bool RequestPaint(IntPtr hwnd) {
+    RECT client;
+    return hwnd != IntPtr.Zero && IsWindowVisible(hwnd) && GetClientRect(hwnd, out client) &&
+      client.right > client.left && client.bottom > client.top && InvalidateRect(hwnd, IntPtr.Zero, false);
+  }
+
+  public static bool PaintPending(IntPtr hwnd) {
+    return hwnd != IntPtr.Zero && GetUpdateRect(hwnd, IntPtr.Zero, false);
+  }
 
   // The window with the keyboard focus in hwnd's thread. Each thread keeps its
   // own focus, also while its windows are in the background (zero when none).
@@ -402,13 +673,477 @@ public static class WindowsComputerUseNative {
     return result.ToArray();
   }
 }
+
+// Low disruption (the default work mode) borrows the pointer and keyboard for
+// a step without waiting for the user to stop. Meanwhile the user's own keys
+// and mouse actions are held here and replayed to the user's window once the
+// foreground and pointer are back, so nothing they type is lost or lands in
+// DSH's window. Afterwards, while a window DSH worked in stays in front (a
+// menu, list or dialog it opened, an app it started), the user's next key
+// first gives the foreground back to their window and is replayed there; a
+// click of theirs ends that. Esc always passes on to the stop listener. When
+// Windows does not install the hooks, or drops one that answered too slowly,
+// only this protection is lost.
+public static class WcuInputHold {
+  public const int Idle = 0, Holding = 1, Guarding = 2, Returning = 3;
+  public static readonly uint ReplayMarker = unchecked(WindowsComputerUseNative.InputMarker + 1u);
+  public struct Held { public bool Key, Up; public int Vk, Scan, Flags, X, Y, MouseData; public uint MouseFlags; }
+
+  // The decisions, without Windows calls, so tests can drive them.
+  public sealed class Core {
+    public int State;
+    public readonly System.Collections.Generic.List<Held> Queue = new System.Collections.Generic.List<Held>();
+    public readonly System.Collections.Generic.HashSet<int> PreHeld = new System.Collections.Generic.HashSet<int>();
+    public readonly System.Collections.Generic.HashSet<int> Keys = new System.Collections.Generic.HashSet<int>();
+    public readonly System.Collections.Generic.HashSet<int> Buttons = new System.Collections.Generic.HashSet<int>();
+    // Keys whose replayed press Windows has taken and whose replayed release
+    // it has not: they read as down without being held by the user.
+    public readonly System.Collections.Generic.HashSet<int> Replaying = new System.Collections.Generic.HashSet<int>();
+    public int X, Y, KeyCount, MouseCount;
+    public bool Moved;
+    public void Reset(int x, int y) { Queue.Clear(); PreHeld.Clear(); Keys.Clear(); Buttons.Clear(); Replaying.Clear(); X = x; Y = y; Moved = false; KeyCount = 0; MouseCount = 0; }
+    static bool Ours(bool injected, bool lowerIntegrity, ulong extra) {
+      return injected && ((!lowerIntegrity && extra == (ulong)WindowsComputerUseNative.InputMarker) || extra == (ulong)ReplayMarker);
+    }
+    // A key (LLKHF flags: 0x01 extended, 0x02 injected at a lower integrity,
+    // 0x10 injected). down: Windows reads the key as down already. In
+    // Guarding, dshInFront: a window DSH worked in is in front and the user's
+    // window is there to go back to. True: swallow the key.
+    public bool Key(int vk, int scan, int flags, ulong extra, bool up, bool down, bool dshInFront, bool overdue) {
+      bool injected = (flags & 0x10) != 0;
+      if (injected && extra == (ulong)ReplayMarker) { if (up) Replaying.Remove(vk); else Replaying.Add(vk); return false; }
+      if (Ours(injected, (flags & 0x02) != 0, extra)) return false;
+      // Auto-repeat of a key the user pressed before the hold. A key whose
+      // replay is under way also reads as down, and a typed character
+      // (VK_PACKET, all characters on one code) never repeats.
+      bool repeat = down && vk != 0xE7 && !Replaying.Contains(vk);
+      if (State == Holding) {
+        if (overdue || vk == 0x1B) return false;
+        if (up) {
+          if (Keys.Remove(vk)) { Add(vk, scan, flags, true); return true; }
+          PreHeld.Remove(vk); return false;
+        }
+        // A key pressed before the hold: its repeats are dropped, its release passes.
+        if (PreHeld.Contains(vk) || (repeat && !Keys.Contains(vk))) { PreHeld.Add(vk); return true; }
+        Keys.Add(vk); KeyCount++; Add(vk, scan, flags, false); return true;
+      }
+      if (State == Guarding) {
+        if (up || vk == 0x1B || !dshInFront) return false;
+        State = Returning; Keys.Clear(); Keys.Add(vk); KeyCount = 1; Add(vk, scan, flags, false); return true;
+      }
+      if (State == Returning) {
+        if (vk == 0x1B) return false;
+        if (up) { if (Keys.Remove(vk)) { Add(vk, scan, flags, true); return true; } return false; }
+        Keys.Add(vk); KeyCount++; Add(vk, scan, flags, false); return true;
+      }
+      return false;
+    }
+    // A mouse event (LLMHF flags: 0x01 injected, 0x02 injected at a lower
+    // integrity). (x, y): where Windows would put the pointer; (cursorX,
+    // cursorY): where it is. True: swallow the event.
+    public bool Mouse(int message, int x, int y, int cursorX, int cursorY, int mouseData, int flags, ulong extra, bool overdue) {
+      bool injected = (flags & 0x01) != 0;
+      if (Ours(injected, (flags & 0x02) != 0, extra)) return false;
+      int button = Button(message, mouseData);
+      // A click of the user's own picks the window: the guard ends.
+      if (State == Guarding) { if (button != 0 && Down(message)) State = Idle; return false; }
+      if (State != Holding || overdue) return false;
+      if (message == 0x200) {
+        // A mouse moves the pointer by a distance; remote control, pens and touch place it.
+        if (injected || (extra & 0xFFFFFF00UL) == 0xFF515700UL) { X = x; Y = y; } else { X += x - cursorX; Y += y - cursorY; }
+        Moved = true; return true;
+      }
+      if (message == 0x20A || message == 0x20E) { MouseCount++; AddMouse(message, mouseData); return true; }
+      if (button == 0) return false;
+      if (Down(message)) { Buttons.Add(button); MouseCount++; AddMouse(message, mouseData); return true; }
+      if (Buttons.Remove(button)) { AddMouse(message, mouseData); return true; }
+      return false;
+    }
+    static bool Down(int message) { return message == 0x201 || message == 0x204 || message == 0x207 || message == 0x20B; }
+    static int Button(int message, int mouseData) {
+      switch (message) {
+        case 0x201: case 0x202: return 1;
+        case 0x204: case 0x205: return 2;
+        case 0x207: case 0x208: return 3;
+        case 0x20B: case 0x20C: return ((mouseData >> 16) & 0xFFFF) == 1 ? 4 : 5;
+        default: return 0;
+      }
+    }
+    void Add(int vk, int scan, int flags, bool up) { var held = new Held(); held.Key = true; held.Vk = vk; held.Scan = scan; held.Flags = flags; held.Up = up; Queue.Add(held); }
+    void AddMouse(int message, int mouseData) {
+      var held = new Held(); held.X = X; held.Y = Y;
+      int high = (short)((mouseData >> 16) & 0xFFFF);
+      switch (message) {
+        case 0x201: held.MouseFlags = 0x0002; break;
+        case 0x202: held.MouseFlags = 0x0004; break;
+        case 0x204: held.MouseFlags = 0x0008; break;
+        case 0x205: held.MouseFlags = 0x0010; break;
+        case 0x207: held.MouseFlags = 0x0020; break;
+        case 0x208: held.MouseFlags = 0x0040; break;
+        case 0x20B: held.MouseFlags = 0x0080; held.MouseData = high & 0xFFFF; break;
+        case 0x20C: held.MouseFlags = 0x0100; held.MouseData = high & 0xFFFF; break;
+        case 0x20A: held.MouseFlags = 0x0800; held.MouseData = high; break;
+        case 0x20E: held.MouseFlags = 0x1000; held.MouseData = high; break;
+      }
+      Queue.Add(held);
+    }
+  }
+
+  // What Windows gets on replay, tagged so that neither hook holds it again.
+  public static WindowsComputerUseNative.INPUT ToInput(Held held) {
+    var input = new WindowsComputerUseNative.INPUT();
+    if (held.Key) {
+      // VK_PACKET: a character another program typed (KEYEVENTF_UNICODE).
+      bool packet = held.Vk == 0xE7;
+      input.type = 1;
+      input.U.ki.wVk = (ushort)(packet ? 0 : held.Vk);
+      input.U.ki.wScan = (ushort)held.Scan;
+      input.U.ki.dwFlags = ((held.Flags & 0x01) != 0 && !packet ? 1u : 0u) | (held.Up ? 2u : 0u) | (packet ? 4u : 0u);
+      input.U.ki.dwExtraInfo = new IntPtr((long)(ulong)ReplayMarker);
+    } else {
+      input.type = 0;
+      input.U.mi.mouseData = unchecked((uint)held.MouseData);
+      input.U.mi.dwFlags = held.MouseFlags;
+      input.U.mi.dwExtraInfo = new IntPtr((long)(ulong)ReplayMarker);
+    }
+    return input;
+  }
+
+  public static readonly Core Decisions = new Core();
+  static readonly object gate = new object();
+  static IntPtr user, pendingUser;
+  static System.Collections.Generic.HashSet<long> dshWindows = new System.Collections.Generic.HashSet<long>();
+  static System.Collections.Generic.HashSet<long> before = new System.Collections.Generic.HashSet<long>(), pendingBefore;
+  static System.Collections.Generic.HashSet<uint> dshProcesses = new System.Collections.Generic.HashSet<uint>();
+  static DateTime since, guardUntil;
+  static string notice;
+  public const string GuardNote = "This window stays in front for now; if the user types before your next step, the foreground goes back to their window first.";
+
+  public sealed class UserInput { public bool Held, Fullscreen; public int Notification; public long Foreground; }
+  static readonly int[] Watched = { 0x01, 0x02, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12, 0x5B, 0x5C };
+  static bool AnyHeld() { foreach (int key in Watched) if ((GetAsyncKeyState(key) & 0x8000) != 0) return true; return false; }
+  // Whether borrowing now would break what the user is doing: a modifier or a
+  // mouse button down, or a full-screen app or presentation in front
+  // (SHQueryUserNotificationState: 2 busy, 3 Direct3D full screen, 4 presentation mode).
+  public static UserInput UserState() {
+    var state = new UserInput();
+    state.Held = AnyHeld();
+    int value;
+    if (SHQueryUserNotificationState(out value) == 0) { state.Notification = value; state.Fullscreen = value == 2 || value == 3 || value == 4; }
+    state.Foreground = WindowsComputerUseNative.GetForegroundWindow().ToInt64();
+    return state;
+  }
+
+  // Before DSH's input on the user's desktop: hold the user's input from now
+  // on. target: the window DSH works in (0: the one in front). False when the
+  // hooks are not there; the step then runs without this protection.
+  public static bool Begin(long target) {
+    var windows = TopLevelSet();
+    uint pid = 0;
+    if (target != 0) WindowsComputerUseNative.GetWindowThreadProcessId(new IntPtr(target), out pid);
+    for (int waited = 0; ; waited += 10) {
+      lock (gate) {
+        if (Decisions.State != Returning || waited >= 1000) {
+          WindowsComputerUseNative.POINT cursor;
+          WindowsComputerUseNative.GetCursorPos(out cursor);
+          // Coming from a guard, the user's window is still the one from before.
+          if (Decisions.State != Guarding) {
+            user = WindowsComputerUseNative.GetForegroundWindow(); before = windows;
+            dshWindows = new System.Collections.Generic.HashSet<long>(); dshProcesses = new System.Collections.Generic.HashSet<uint>();
+          }
+          Decisions.Reset(cursor.x, cursor.y);
+          if (target != 0) dshWindows.Add(target);
+          if (pid != 0) dshProcesses.Add(pid);
+          since = DateTime.UtcNow;
+          Decisions.State = Holding;
+          break;
+        }
+      }
+      System.Threading.Thread.Sleep(10);
+    }
+    // A fresh pair: Windows may have dropped an older hook without a word.
+    Request(UninstallMessage, true);
+    if (!Request(InstallMessage, false)) {
+      lock (gate) Decisions.State = Idle;
+      Request(UninstallMessage, true);
+      return false;
+    }
+    for (int key = 0x08; key <= 0xFE; key++) if (key != 0xE7 && (GetAsyncKeyState(key) & 0x8000) != 0) lock (gate) Decisions.PreHeld.Add(key);
+    return true;
+  }
+
+  // During the hold, a modifier or button the user pressed before it may still
+  // be down; its release passes. True once none is down.
+  public static bool WaitForRelease(int milliseconds) {
+    DateTime start = DateTime.UtcNow;
+    while (AnyHeld()) {
+      if ((DateTime.UtcNow - start).TotalMilliseconds >= milliseconds) return false;
+      System.Threading.Thread.Sleep(10);
+    }
+    return true;
+  }
+
+  // After DSH's input, with the foreground and pointer given back: replay what
+  // the user did meanwhile. windows: what DSH worked in (the target and the
+  // menus, lists and dialogs it opened). A note for the result, or null.
+  public static string End(long[] windows) {
+    IntPtr target; bool hasKeys = false; int keys, mouse;
+    lock (gate) {
+      if (Decisions.State != Holding) return null;
+      if (windows != null) foreach (long window in windows) if (window != 0) dshWindows.Add(window);
+      if (Decisions.Keys.Count > 0) hasKeys = true;
+      foreach (Held held in Decisions.Queue) if (held.Key) hasKeys = true;
+      keys = Decisions.KeyCount; mouse = Decisions.MouseCount; target = user;
+    }
+    IntPtr front = WindowsComputerUseNative.GetForegroundWindow();
+    bool there = Present(target), returned = false, deliver = true, elevated = false, guard;
+    if (hasKeys && front != target) { returned = there && GiveBack(target); deliver = returned; }
+    // Windows lets no program type into a window that runs at a higher
+    // integrity level (an app run as administrator while DSH is not).
+    if (hasKeys && deliver && there) {
+      uint pid; WindowsComputerUseNative.GetWindowThreadProcessId(target, out pid);
+      var identity = pid == 0 ? null : WindowsComputerUseNative.ReadInputProcess(pid, false);
+      uint? own = WindowsComputerUseNative.ReadCurrentIntegrity();
+      if (identity != null && identity.Integrity.HasValue && own.HasValue && identity.Integrity.Value > own.Value) { deliver = false; elevated = true; }
+    }
+    lock (gate) guard = !hasKeys && there && front != target && IsDsh(front);
+    int dropped = Drain(deliver, Holding, guard ? Guarding : Idle);
+    int x, y; bool moved;
+    lock (gate) { moved = Decisions.Moved; x = Decisions.X; y = Decisions.Y; guardUntil = DateTime.UtcNow.AddMinutes(10); }
+    if (moved) Place(x, y);
+    if (!guard) Request(UninstallMessage, false);
+    var parts = new System.Collections.Generic.List<string>();
+    if (elevated) parts.Add("The user typed during this step in a window that runs as administrator; Windows lets DSH replay no keys there, so they were dropped.");
+    else if (returned) parts.Add("The user was typing, so the foreground went back to their window and their keys went there; a menu or list this step opened may have closed.");
+    else if (dropped > 0) parts.Add("The user typed during this step, but Windows kept this window in front, so their keys were dropped rather than sent here.");
+    else if (keys + mouse > 0) parts.Add("The user's own input during this step was held and then replayed to their window.");
+    if (guard) parts.Add(GuardNote);
+    return parts.Count == 0 ? null : String.Join(" ", parts.ToArray());
+  }
+
+  // Before an action that may bring a window forward without real input (an
+  // app DSH starts, activate_window, an element action whose app comes forward).
+  public static void Snapshot() {
+    var windows = TopLevelSet();
+    IntPtr front = WindowsComputerUseNative.GetForegroundWindow();
+    lock (gate) {
+      if (Decisions.State == Guarding) { pendingUser = user; pendingBefore = before; }
+      else if (Decisions.State == Idle) { pendingUser = front; pendingBefore = windows; }
+    }
+  }
+  // After it: until the user clicks, DSH's next input step or ten minutes, a
+  // key the user types while one of these windows, or a new window of these
+  // processes, is in front goes to the user's own window instead.
+  public static bool ArmGuard(long[] windows, long[] processes) {
+    lock (gate) {
+      if (pendingUser == IntPtr.Zero || (Decisions.State != Idle && Decisions.State != Guarding)) return false;
+      if (Decisions.State == Idle) { dshWindows = new System.Collections.Generic.HashSet<long>(); dshProcesses = new System.Collections.Generic.HashSet<uint>(); }
+      user = pendingUser; before = pendingBefore ?? new System.Collections.Generic.HashSet<long>(); pendingUser = IntPtr.Zero;
+      if (windows != null) foreach (long window in windows) if (window != 0) dshWindows.Add(window);
+      if (processes != null) foreach (long process in processes) if (process > 0) dshProcesses.Add((uint)process);
+      Decisions.Reset(0, 0); Decisions.State = Guarding; guardUntil = DateTime.UtcNow.AddMinutes(10);
+    }
+    if (Request(InstallMessage, false)) return true;
+    lock (gate) if (Decisions.State == Guarding) Decisions.State = Idle;
+    return false;
+  }
+
+  // A guard that acted between two steps, for the next result.
+  public static string TakeNotice() { lock (gate) { string text = notice; notice = null; return text; } }
+
+  static bool Present(IntPtr window) { return window != IntPtr.Zero && WindowsComputerUseNative.IsWindow(window) && WindowsComputerUseNative.IsWindowVisible(window); }
+  static bool GiveBack(IntPtr window) {
+    if (WindowsComputerUseNative.GiveForeground(window)) return true;
+    System.Threading.Thread.Sleep(30);
+    return WindowsComputerUseNative.GiveForeground(window);
+  }
+  static void Place(int x, int y) {
+    int left = WindowsComputerUseNative.GetSystemMetrics(76), top = WindowsComputerUseNative.GetSystemMetrics(77);
+    int width = WindowsComputerUseNative.GetSystemMetrics(78), height = WindowsComputerUseNative.GetSystemMetrics(79);
+    if (width > 0 && height > 0) { x = Math.Max(left, Math.Min(left + width - 1, x)); y = Math.Max(top, Math.Min(top + height - 1, y)); }
+    WindowsComputerUseNative.SetCursorPos(x, y);
+  }
+  static System.Collections.Generic.HashSet<long> TopLevelSet() {
+    var set = new System.Collections.Generic.HashSet<long>();
+    foreach (IntPtr window in WindowsComputerUseNative.TopLevelWindows()) set.Add(window.ToInt64());
+    return set;
+  }
+  // Under gate. A window DSH worked in, one of them owns, or a new window of
+  // the processes DSH worked in.
+  static bool IsDsh(IntPtr window) {
+    if (window == IntPtr.Zero) return false;
+    IntPtr owner = window;
+    for (int depth = 0; owner != IntPtr.Zero && depth < 8; depth++) {
+      if (dshWindows.Contains(owner.ToInt64())) return true;
+      owner = WindowsComputerUseNative.GetWindow(owner, 4);
+    }
+    uint pid; WindowsComputerUseNative.GetWindowThreadProcessId(window, out pid);
+    return pid != 0 && dshProcesses.Contains(pid) && !before.Contains(window.ToInt64());
+  }
+  static bool Overdue() { return (DateTime.UtcNow - since).TotalMilliseconds > 8000; }
+
+  // Replays the queue in order, also what arrives meanwhile, then switches
+  // from expected to next once nothing is left (unless a new step took over).
+  // Each batch waits until the hooks have seen its events: input the user sent
+  // before them is ahead in Windows' queue and must be held, not let through
+  // after the switch ahead of the replay. Keys go nowhere when they cannot
+  // reach the user's window. Returns how many key events were dropped.
+  static int Drain(bool deliverKeys, int expected, int next) {
+    int dropped = 0, size = Marshal.SizeOf(typeof(WindowsComputerUseNative.INPUT));
+    for (;;) {
+      Held[] batch;
+      lock (gate) {
+        if (Decisions.State != expected) return dropped;
+        if (Decisions.Queue.Count == 0) { Decisions.State = next; Decisions.Keys.Clear(); Decisions.Buttons.Clear(); Decisions.PreHeld.Clear(); return dropped; }
+        batch = Decisions.Queue.ToArray(); Decisions.Queue.Clear();
+      }
+      int sent = 0;
+      foreach (Held held in batch) {
+        if (held.Key && !deliverKeys) { dropped++; continue; }
+        if (!held.Key) WindowsComputerUseNative.SetCursorPos(held.X, held.Y);
+        sent += (int)WindowsComputerUseNative.SendInput(1, new WindowsComputerUseNative.INPUT[] { ToInput(held) }, size);
+      }
+      int target = System.Threading.Interlocked.Add(ref replaySent, sent);
+      DateTime start = DateTime.UtcNow;
+      while (System.Threading.Volatile.Read(ref replaySeen) < target && (DateTime.UtcNow - start).TotalMilliseconds < 500) System.Threading.Thread.Sleep(1);
+      if (System.Threading.Volatile.Read(ref replaySeen) < target) System.Threading.Interlocked.Exchange(ref replaySeen, target);
+    }
+  }
+  static int replaySent, replaySeen;
+  // On the hook thread: a replayed event has reached the hooks.
+  static void Seen(bool injected, ulong extra) { if (injected && extra == (ulong)ReplayMarker) System.Threading.Interlocked.Increment(ref replaySeen); }
+  static void ReturnToUser(object ignored) {
+    IntPtr target; lock (gate) target = user;
+    bool returned = Present(target) && GiveBack(target);
+    Drain(returned, Returning, Idle);
+    lock (gate) notice = returned
+      ? "Since your last step the user typed while a window DSH worked in was in front, so the foreground went back to their window and their keys went there. Observe again before acting in that window."
+      : "Since your last step the user typed while a window DSH worked in was in front; Windows did not give their window the foreground, so those keys were dropped.";
+    Request(UninstallMessage, false);
+  }
+
+  // The hooks live on one thread with a message loop. Install and remove are
+  // requests to it; a remove without force waits until nothing is held or guarded.
+  delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)] struct KeyData { public uint vk, scan, flags, time; public UIntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] struct MouseData { public int x, y; public uint data, flags, time; public UIntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] struct Msg { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int x, y; }
+  [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int id, HookProc proc, IntPtr module, uint thread);
+  [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
+  [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+  [DllImport("user32.dll")] static extern bool PostThreadMessage(uint thread, uint message, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] static extern int GetMessage(out Msg message, IntPtr hwnd, uint min, uint max);
+  [DllImport("user32.dll")] static extern bool PeekMessage(out Msg message, IntPtr hwnd, uint min, uint max, uint remove);
+  [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+  [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
+  const uint InstallMessage = 0x8001, UninstallMessage = 0x8002;
+  static readonly HookProc keyboardProc = OnKey, mouseProc = OnMouse;
+  static readonly object pump = new object();
+  static System.Threading.Thread thread;
+  static uint threadId;
+  static int requested, done;
+  static IntPtr keyboardHook, mouseHook;
+
+  static void Pump() {
+    Msg message;
+    PeekMessage(out message, IntPtr.Zero, 0, 0, 0);
+    lock (pump) { threadId = WindowsComputerUseNative.GetCurrentThreadId(); System.Threading.Monitor.PulseAll(pump); }
+    while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0) {
+      if (message.message == InstallMessage) {
+        if (keyboardHook == IntPtr.Zero) keyboardHook = SetWindowsHookEx(13, keyboardProc, GetModuleHandle(null), 0);
+        if (mouseHook == IntPtr.Zero) mouseHook = SetWindowsHookEx(14, mouseProc, GetModuleHandle(null), 0);
+      } else if (message.message == UninstallMessage) {
+        bool idle; lock (gate) idle = Decisions.State == Idle;
+        if (idle || message.lParam != IntPtr.Zero) {
+          if (keyboardHook != IntPtr.Zero) { UnhookWindowsHookEx(keyboardHook); keyboardHook = IntPtr.Zero; }
+          if (mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+        }
+      } else continue;
+      lock (pump) { done = Math.Max(done, message.wParam.ToInt32()); System.Threading.Monitor.PulseAll(pump); }
+    }
+  }
+  static bool Request(uint message, bool force) {
+    int sequence; uint target;
+    lock (pump) {
+      if (thread == null || !thread.IsAlive) {
+        threadId = 0;
+        thread = new System.Threading.Thread(Pump);
+        thread.IsBackground = true; thread.Name = "DSH input hold"; thread.Start();
+        DateTime start = DateTime.UtcNow;
+        while (threadId == 0 && (DateTime.UtcNow - start).TotalMilliseconds < 2000) System.Threading.Monitor.Wait(pump, 100);
+        if (threadId == 0) return false;
+      }
+      sequence = ++requested; target = threadId;
+    }
+    if (!PostThreadMessage(target, message, new IntPtr(sequence), new IntPtr(force ? 1 : 0))) return false;
+    lock (pump) {
+      DateTime start = DateTime.UtcNow;
+      while (done < sequence) {
+        int left = 1000 - (int)(DateTime.UtcNow - start).TotalMilliseconds;
+        if (left <= 0) return false;
+        System.Threading.Monitor.Wait(pump, left);
+      }
+      return message != InstallMessage || (keyboardHook != IntPtr.Zero && mouseHook != IntPtr.Zero);
+    }
+  }
+  static void Release() { PostThreadMessage(threadId, UninstallMessage, IntPtr.Zero, IntPtr.Zero); }
+
+  static IntPtr OnKey(int code, IntPtr wParam, IntPtr lParam) {
+    if (code >= 0) {
+      var data = (KeyData)Marshal.PtrToStructure(lParam, typeof(KeyData));
+      Seen((data.flags & 0x10) != 0, data.extra.ToUInt64());
+      int kind = wParam.ToInt32();
+      bool up = kind == 0x101 || kind == 0x105, swallow, returning, ended;
+      bool down = !up && (GetAsyncKeyState((int)data.vk) & 0x8000) != 0;
+      lock (gate) {
+        int was = Decisions.State;
+        bool dshInFront = false;
+        if (was == Guarding && !up) {
+          if (DateTime.UtcNow > guardUntil) Decisions.State = Idle;
+          else {
+            IntPtr front = WindowsComputerUseNative.GetForegroundWindow();
+            dshInFront = front != user && Present(user) && IsDsh(front);
+          }
+        }
+        swallow = Decisions.Key((int)data.vk, (int)data.scan, (int)data.flags, data.extra.ToUInt64(), up, down, dshInFront, was == Holding && Overdue());
+        returning = was == Guarding && Decisions.State == Returning;
+        ended = was == Guarding && Decisions.State == Idle;
+      }
+      if (returning) System.Threading.ThreadPool.QueueUserWorkItem(ReturnToUser);
+      if (ended) Release();
+      if (swallow) return new IntPtr(1);
+    }
+    return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+  }
+  static IntPtr OnMouse(int code, IntPtr wParam, IntPtr lParam) {
+    if (code >= 0) {
+      var data = (MouseData)Marshal.PtrToStructure(lParam, typeof(MouseData));
+      Seen((data.flags & 0x01) != 0, data.extra.ToUInt64());
+      WindowsComputerUseNative.POINT cursor;
+      WindowsComputerUseNative.GetCursorPos(out cursor);
+      bool swallow, ended;
+      lock (gate) {
+        int was = Decisions.State;
+        swallow = Decisions.Mouse(wParam.ToInt32(), data.x, data.y, cursor.x, cursor.y, unchecked((int)data.data), (int)data.flags, data.extra.ToUInt64(), was == Holding && Overdue());
+        ended = was == Guarding && Decisions.State == Idle;
+      }
+      if (ended) Release();
+      if (swallow) return new IntPtr(1);
+    }
+    return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+  }
+}
 '@
 
 function Get-CsHash {
   param([string]$Source)
+  $normalized = $Source.Replace("`r`n", "`n").Replace("`r", "`n")
   $sha = [System.Security.Cryptography.SHA256]::Create()
-  $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Source))
-  return ([BitConverter]::ToString($bytes).Replace("-", "").Substring(0, 16)).ToLowerInvariant()
+  try {
+    $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalized))
+    return ([BitConverter]::ToString($bytes).Replace("-", "").Substring(0, 16)).ToLowerInvariant()
+  } finally { $sha.Dispose() }
 }
 
 # Load a helper compiled into %TEMP%, compiling it first when no cached copy
@@ -430,6 +1165,71 @@ function Remove-TempFile {
   try { [System.IO.File]::Delete($Path) } catch { }
 }
 
+function Get-HelperCacheDir {
+  $local = [Environment]::GetFolderPath('LocalApplicationData')
+  $configured = [string]$env:TEMP
+  if ($configured -and [IO.Directory]::Exists($configured)) {
+    # Resolve a user's usual 8.3 TEMP spelling before deciding whether it is
+    # a caller override. Cache file I/O itself still uses .NET paths.
+    try { $configured = (Get-Item -LiteralPath $configured -ErrorAction Stop).FullName } catch {}
+  }
+  $default = Join-Path $local 'Temp'
+  $userTemp = [Environment]::ExpandEnvironmentVariables([string][Environment]::GetEnvironmentVariable('TEMP','User'))
+  if ($configured -and $configured.TrimEnd('\') -ne $default.TrimEnd('\') -and $configured -ne $userTemp) {
+    if (-not [IO.Path]::IsPathRooted($configured)) { throw 'The configured TEMP path must be absolute.' }
+    $dir = [IO.Path]::GetFullPath($configured)
+  } else {
+    $dir = Join-Path $local 'dsh-computer-use-win\native-cache'
+    if (-not [IO.Directory]::Exists($dir)) {
+      $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+      try {
+        $acl=[Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true,$false)
+        foreach($sid in @($identity.User,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+          $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+        }
+        if ($PSVersionTable.PSEdition -eq 'Core') { [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($dir),$acl) }
+        else { [void][IO.Directory]::CreateDirectory($dir,$acl) }
+      } finally { $identity.Dispose() }
+    }
+  }
+  [void][IO.Directory]::CreateDirectory($dir)
+  Assert-PrivateHelperPath $dir -Directory
+  return $dir
+}
+
+function Assert-PrivateHelperPath {
+  param([string]$Path, [switch]$Directory)
+  $attributes = [IO.File]::GetAttributes($Path)
+  if (($attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      ([bool]($attributes -band [IO.FileAttributes]::Directory) -ne [bool]$Directory)) {
+    throw 'Native cache must contain ordinary files in a private directory.'
+  }
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  try { $trusted = @($identity.User.Value,$identity.Owner.Value,'S-1-5-18','S-1-5-32-544') }
+  finally { $identity.Dispose() }
+  $item = if ($Directory) { [IO.DirectoryInfo]::new($Path) } else { [IO.FileInfo]::new($Path) }
+  $sections = [Security.AccessControl.AccessControlSections]::Access -bor [Security.AccessControl.AccessControlSections]::Owner
+  $acl = if ($PSVersionTable.PSEdition -eq 'Core') { [IO.FileSystemAclExtensions]::GetAccessControl($item,$sections) } else { $item.GetAccessControl($sections) }
+  if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted) {
+    throw 'Native cache ownership does not match the Windows account.'
+  }
+  $writeRights = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership'
+  foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+    if ($rule.AccessControlType -eq 'Allow' -and -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+        ($rule.FileSystemRights -band $writeRights) -and $rule.IdentityReference.Value -notin $trusted) {
+      throw 'Native cache grants write access to another account.'
+    }
+  }
+}
+
+function Get-HelperDigest {
+  param([byte[]]$Bytes)
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+}
+
 # A compile that failed or was cut off leaves <helper>.<pid>.<guid>.dll and
 # its .cs source behind (one pair per OCR call on the machines of #78). Those
 # an hour old are removed before a helper is compiled.
@@ -438,30 +1238,47 @@ function Remove-StaleHelperParts {
   $cutoff = [DateTime]::UtcNow.AddHours(-1)
   try {
     foreach ($file in [System.IO.Directory]::EnumerateFiles($Directory, 'wcu-*.dll*')) {
-      if ([System.IO.Path]::GetFileName($file) -cmatch '^wcu-(native|ocr|wgc)-[a-z0-9-]+\.\d+\.[0-9a-f]{32}\.dll(\.cs)?$' -and [System.IO.File]::GetLastWriteTimeUtc($file) -lt $cutoff) { Remove-TempFile $file }
+      if ([System.IO.Path]::GetFileName($file) -cmatch '^wcu-(native|ocr|clipboard|wgc)-[a-z0-9-]+\.\d+\.[0-9a-f]{32}\.dll(\.cs)?$' -and [System.IO.File]::GetLastWriteTimeUtc($file) -lt $cutoff) { Remove-TempFile $file }
     }
   } catch { }
 }
 
 function Import-HelperAssembly {
   param([string]$Path, [scriptblock]$Compile)
-  if (-not [System.IO.File]::Exists($Path)) {
-    Remove-StaleHelperParts ([System.IO.Path]::GetDirectoryName($Path))
-    $partial = $Path -replace '\.dll$', (".$PID." + [Guid]::NewGuid().ToString('N') + '.dll')
-    try {
-      & $Compile $partial
-      try { [System.IO.File]::Move($partial, $Path) }
-      catch { if (-not [System.IO.File]::Exists($Path)) { throw } }
-      if ([System.IO.File]::Exists($partial)) {
-        [void][System.Reflection.Assembly]::Load([System.IO.File]::ReadAllBytes($partial))
+  $directory = [IO.Path]::GetDirectoryName($Path)
+  Assert-PrivateHelperPath $directory -Directory
+  $digestFile = $Path + '.sha256'
+  $mutex = [Threading.Mutex]::new($false, ('Local\DSH-WCU-Helper-' + (Get-CsHash $Path.ToUpperInvariant())))
+  $owned = $false
+  $partial = $Path -replace '\.dll$', (".$PID." + [Guid]::NewGuid().ToString('N') + '.dll')
+  try {
+    try { $owned = $mutex.WaitOne(20000) } catch [Threading.AbandonedMutexException] { $owned = $true }
+    if (-not $owned) { throw 'Timed out waiting for the native helper cache.' }
+    if ([IO.File]::Exists($Path)) { Assert-PrivateHelperPath $Path }
+    if ([IO.File]::Exists($digestFile)) { Assert-PrivateHelperPath $digestFile }
+    if ([IO.File]::Exists($Path) -and [IO.File]::Exists($digestFile)) {
+      $bytes = [IO.File]::ReadAllBytes($Path)
+      if ((Get-HelperDigest $bytes) -ceq [IO.File]::ReadAllText($digestFile)) {
+        [void][Reflection.Assembly]::Load($bytes)
         return
       }
-    } finally {
-      Remove-TempFile $partial
-      Remove-TempFile "$partial.cs"
     }
+    Remove-StaleHelperParts $directory
+    & $Compile $partial
+    $bytes = [IO.File]::ReadAllBytes($partial)
+    [IO.File]::WriteAllText("$partial.sha256",(Get-HelperDigest $bytes))
+    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($partial,$Path,[NullString]::Value) }
+    else { [IO.File]::Move($partial,$Path) }
+    if ([IO.File]::Exists($digestFile)) { [IO.File]::Replace("$partial.sha256",$digestFile,[NullString]::Value) }
+    else { [IO.File]::Move("$partial.sha256",$digestFile) }
+    [void][Reflection.Assembly]::Load($bytes)
+  } finally {
+    Remove-TempFile $partial
+    Remove-TempFile "$partial.cs"
+    Remove-TempFile "$partial.sha256"
+    if ($owned) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
   }
-  [void][System.Reflection.Assembly]::Load([System.IO.File]::ReadAllBytes($Path))
 }
 
 function Load-Assemblies {
@@ -474,8 +1291,11 @@ function Load-Assemblies {
     # Add-Type targets the current runtime. A Core-built helper cannot be used
     # by Windows PowerShell 5.1 even when its C# source is identical.
     $runtimeKey = $PSVersionTable.PSEdition.ToLowerInvariant() + '-clr' + [Environment]::Version.Major
-    $dll = Join-Path $env:TEMP ("wcu-native-" + $runtimeKey + '-' + (Get-CsHash -Source $script:WcuCs) + ".dll")
-    Import-HelperAssembly -Path $dll -Compile { param($out) Add-Type -TypeDefinition $script:WcuCs -OutputAssembly $out }
+    $precompiled = (Get-Command Import-PackagedHelper -ErrorAction SilentlyContinue) -and (Import-PackagedHelper -Name native -Source $script:WcuCs)
+    if (-not $precompiled) {
+      $dll = Join-Path (Get-HelperCacheDir) ("wcu-native-" + $runtimeKey + '-' + (Get-CsHash -Source $script:WcuCs) + ".dll")
+      Import-HelperAssembly -Path $dll -Compile { param($out) Add-Type -TypeDefinition $script:WcuCs -OutputAssembly $out }
+    }
   }
   Write-BackendStage 'native-load-complete'
   Set-DpiAware
@@ -507,8 +1327,10 @@ function Load-Assemblies {
 function Set-DpiAware {
   # Per-Monitor V2 (context value -4); fall back to system-aware. Must run
   # before any screen/UIA work so coordinates and pixels are physical.
-  $ok = [WindowsComputerUseNative]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
-  if ($ok -ne [IntPtr]::Zero) {
+  $ok = $false
+  try { $ok = [WindowsComputerUseNative]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) }
+  catch [EntryPointNotFoundException] {}
+  if (-not $ok) {
     [void][WindowsComputerUseNative]::SetProcessDPIAware()
   }
 }
@@ -569,6 +1391,7 @@ function Get-Patterns {
 
 function Get-ValueText {
   param([object]$Element)
+  if (Invoke-Safe { $Element.Current.IsPassword } $true) { return $null }
   $pattern = $null
   if (Invoke-Safe { $Element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern) } $false) {
     return Invoke-Safe { $pattern.Current.Value } $null
@@ -585,7 +1408,7 @@ function New-ElementCacheRequest {
   # below use Cached, including RuntimeId. Never fetch an entire subtree.
   $cache.AutomationElementMode = [System.Windows.Automation.AutomationElementMode]::Full
   foreach ($name in @('Name','AutomationId','ClassName','ControlType','BoundingRectangle',
-      'IsEnabled','IsOffscreen','HasKeyboardFocus','ProcessId','NativeWindowHandle','RuntimeId','FrameworkId')) {
+      'IsEnabled','IsOffscreen','HasKeyboardFocus','ProcessId','NativeWindowHandle','RuntimeId','FrameworkId','IsPassword')) {
     $cache.Add([System.Windows.Automation.AutomationElement]::("${name}Property"))
   }
   if ($DetailLevel -eq "full") {
@@ -601,7 +1424,20 @@ function New-ElementCacheRequest {
   return $cache
 }
 
+$script:ElementGeneration = [long]0
 $script:ElementRegistry = @{}
+function Register-ObservedElement {
+  param([string]$Id,[object]$Element,[object]$Owner)
+  if ($null -eq $script:ElementRegistry) { $script:ElementRegistry=@{} }
+  if (-not $script:ElementRegistry.ContainsKey($Id) -and $script:ElementRegistry.Count -ge 6000) {
+    $candidates=@($script:ElementRegistry.GetEnumerator() | Where-Object {
+      [long]$_.Value.generation -ne [long]$script:ElementGeneration
+    } | Sort-Object { [long]$_.Value.ts } | Select-Object -First 1000)
+    foreach ($old in $candidates) { $script:ElementRegistry.Remove($old.Key) }
+  }
+  $script:ElementRegistry[$Id]=@{element=$Element;hwnd=$Owner.nativeWindowHandle;processId=$Owner.processId;
+    ts=[DateTimeOffset]::Now.ToUnixTimeMilliseconds();generation=$script:ElementGeneration}
+}
 $script:ObservationOwner = $null
 $script:NativeOwners = @{}
 function Convert-ElementInfo {
@@ -615,43 +1451,53 @@ function Convert-ElementInfo {
   if (-not $UseCache) {
     $Element = $Element.GetUpdatedCache((New-ElementCacheRequest $DetailLevel))
   }
-  $rect = Convert-Rect (Invoke-Safe { $Element.Cached.BoundingRectangle } $null)
-  $rtArr = Invoke-Safe { @($Element.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::RuntimeIdProperty)) } $null
+  $cached = try { $Element.Cached } catch { $null }
+  $rect = Convert-Rect $(try { $cached.BoundingRectangle } catch { $null })
+  $rtArr = try { @($Element.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::RuntimeIdProperty)) } catch { $null }
   $rtStr = $null
   if ($null -ne $rtArr -and $rtArr.Count -ge 2) { $rtStr = ($rtArr | ForEach-Object { [int]$_ }) -join "-" }
   $info = [ordered]@{
     id = if ($null -ne $rtStr) { "uia:rt:$rtStr" } else { $Id }
     depth = $Depth
-    name = Invoke-Safe { $Element.Cached.Name } ""
-    automationId = Invoke-Safe { $Element.Cached.AutomationId } ""
-    className = Invoke-Safe { $Element.Cached.ClassName } ""
-    controlType = Get-ControlTypeName (Invoke-Safe { $Element.Cached.ControlType } $null)
+    name = $(try { $cached.Name } catch { "" })
+    automationId = $(try { $cached.AutomationId } catch { "" })
+    className = $(try { $cached.ClassName } catch { "" })
+    controlType = Get-ControlTypeName $(try { $cached.ControlType } catch { $null })
     boundingBox = $rect
-    isEnabled = Invoke-Safe { $Element.Cached.IsEnabled } $null
-    isOffscreen = Invoke-Safe { $Element.Cached.IsOffscreen } $null
-    hasKeyboardFocus = Invoke-Safe { $Element.Cached.HasKeyboardFocus } $null
+    isEnabled = $(try { $cached.IsEnabled } catch { $null })
+    isOffscreen = $(try { $cached.IsOffscreen } catch { $null })
+    hasKeyboardFocus = $(try { $cached.HasKeyboardFocus } catch { $null })
   }
   if ($null -ne $rtStr -and $null -ne $script:ObservationOwner) {
-    if ($null -eq $script:ElementRegistry) { $script:ElementRegistry = @{} }
-    if ($script:ElementRegistry.Count -ge 6000) { $script:ElementRegistry.Clear() }
-    $script:ElementRegistry["uia:rt:$rtStr"] = @{element=$Element;hwnd=$script:ObservationOwner.nativeWindowHandle;processId=$script:ObservationOwner.processId;ts=[DateTimeOffset]::Now.ToUnixTimeMilliseconds()}
+    Register-ObservedElement "uia:rt:$rtStr" $Element $script:ObservationOwner
   }
   if ($DetailLevel -eq "full") {
-    $valuePattern = Invoke-Safe { $Element.GetCachedPattern([System.Windows.Automation.ValuePattern]::Pattern) } $null
+    $valuePattern = $null
     $patterns = New-Object System.Collections.Generic.List[string]
-    foreach ($name in @('Invoke','Value','Toggle','SelectionItem','ExpandCollapse','ScrollItem')) {
-      $patternType = "System.Windows.Automation.${name}Pattern" -as [type]
-      if ($null -ne (Invoke-Safe { $Element.GetCachedPattern($patternType::Pattern) } $null)) { $patterns.Add($name) }
+    foreach ($pair in @(
+      @('Invoke', [System.Windows.Automation.InvokePattern]::Pattern),
+      @('Value', [System.Windows.Automation.ValuePattern]::Pattern),
+      @('Toggle', [System.Windows.Automation.TogglePattern]::Pattern),
+      @('SelectionItem', [System.Windows.Automation.SelectionItemPattern]::Pattern),
+      @('ExpandCollapse', [System.Windows.Automation.ExpandCollapsePattern]::Pattern),
+      @('ScrollItem', [System.Windows.Automation.ScrollItemPattern]::Pattern)
+    )) {
+      $pat = try { $Element.GetCachedPattern($pair[1]) } catch { $null }
+      if ($null -ne $pat) {
+        $patterns.Add($pair[0])
+        if ($pair[0] -eq 'Value') { $valuePattern = $pat }
+      }
     }
-    $info["localizedControlType"] = Invoke-Safe { $Element.Cached.LocalizedControlType } ""
-    $info["processId"] = Invoke-Safe { $Element.Cached.ProcessId } $null
-    $info["nativeWindowHandle"] = Invoke-Safe { $Element.Cached.NativeWindowHandle } $null
+    $info["localizedControlType"] = try { $cached.LocalizedControlType } catch { "" }
+    $info["processId"] = try { $cached.ProcessId } catch { $null }
+    $info["nativeWindowHandle"] = try { $cached.NativeWindowHandle } catch { $null }
     $info["runtimeId"] = $rtStr
-    $info["value"] = if ($null -ne $valuePattern) { Invoke-Safe { $valuePattern.Cached.Value } $null } else { $null }
+    $isPassword = Invoke-Safe { $cached.IsPassword } $true
+    $info["value"] = if ($null -ne $valuePattern -and -not $isPassword) { try { $valuePattern.Cached.Value } catch { $null } } else { $null }
     $info["patterns"] = [string[]]$patterns.ToArray()
   } else {
-    if ($Depth -le 1) { $info["processId"] = Invoke-Safe { $Element.Cached.ProcessId } $null }
-    $nativeHwnd = Invoke-Safe { $Element.Cached.NativeWindowHandle } 0
+    if ($Depth -le 1) { $info["processId"] = try { $cached.ProcessId } catch { $null } }
+    $nativeHwnd = try { $cached.NativeWindowHandle } catch { 0 }
     if ($nativeHwnd) { $info["nativeWindowHandle"] = $nativeHwnd }
   }
   return $info
@@ -689,6 +1535,7 @@ function Set-WindowForeground {
   param([object]$Element)
   $hwnd = if (Get-Prop $Element 'nativeWindowHandle' 0) { [int64]$Element.nativeWindowHandle } else { Invoke-Safe { $Element.Current.NativeWindowHandle } 0 }
   if (-not ($hwnd -and $hwnd -ne 0)) { return $false }
+  Assert-NativeInputTarget $hwnd
   $ptr = [IntPtr]([int64]$hwnd)
 
   # SW_RESTORE is not a no-op on maximized/snapped windows: it un-maximizes
@@ -696,6 +1543,15 @@ function Set-WindowForeground {
   if ([WindowsComputerUseNative]::IsIconic($ptr)) {
     if ($env:WCU_CANCEL_EVENT) { [WindowsComputerUseNative]::ThrowIfCancelled() }
     [WindowsComputerUseNative]::ShowWindow($ptr, 9) | Out-Null
+    # Wait until it is restored. A window that ignores ShowWindow still takes
+    # the Restore command of its system menu (WM_SYSCOMMAND, SC_RESTORE).
+    for ($i = 0; $i -lt 10 -and [WindowsComputerUseNative]::IsIconic($ptr); $i++) {
+      if ($i -eq 4) { [void][WindowsComputerUseNative]::PostMessageW($ptr, 0x0112, [IntPtr]0xF120, [IntPtr]::Zero) }
+      Start-Sleep -Milliseconds 50
+    }
+    # A minimized window can still take the foreground, but nobody sees it and
+    # input would go to it unseen: report the activation as failed.
+    if ([WindowsComputerUseNative]::IsIconic($ptr)) { return $false }
     Start-Sleep -Milliseconds 80
   }
   # First without a key press: joining the input of the thread in front lets
@@ -709,23 +1565,23 @@ function Set-WindowForeground {
   # the current foreground window's thread and tapping the Alt key releases
   # the lock long enough to switch (classic AutoHotkey trick).
   $fgPtr = [WindowsComputerUseNative]::GetForegroundWindow()
-  $fgThread = [uint32]0
-  $tgtThread = [uint32]0
-  [void][WindowsComputerUseNative]::GetWindowThreadProcessId($fgPtr, [ref]$fgThread)
-  [void][WindowsComputerUseNative]::GetWindowThreadProcessId($ptr, [ref]$tgtThread)
+  $fgProcess = [uint32]0
+  $fgThread = [WindowsComputerUseNative]::GetWindowThreadProcessId($fgPtr, [ref]$fgProcess)
+  if (-not $fgThread) { return $false }
+  $ownThread = [WindowsComputerUseNative]::GetCurrentThreadId()
   $attached = $false
-  if ($fgThread -ne $tgtThread -and $fgThread -ne 0) {
-    $attached = [WindowsComputerUseNative]::AttachThreadInput($tgtThread, $fgThread, $true)
+  if ($fgThread -ne $ownThread) {
+    $attached = [WindowsComputerUseNative]::AttachThreadInput($ownThread, $fgThread, $true)
   }
   try {
     if ($env:WCU_CANCEL_EVENT) { [WindowsComputerUseNative]::ThrowIfCancelled() }
-    [void][WindowsComputerUseNative]::keybd_event([WindowsComputerUseNative]::VK_MENU, 0, 0, [UIntPtr]::Zero)
-    [void][WindowsComputerUseNative]::keybd_event([WindowsComputerUseNative]::VK_MENU, 0, [WindowsComputerUseNative]::KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+    [void][WindowsComputerUseNative]::keybd_event([WindowsComputerUseNative]::VK_MENU, 0, 0, [UIntPtr]([uint64][WindowsComputerUseNative]::InputMarker))
+    [void][WindowsComputerUseNative]::keybd_event([WindowsComputerUseNative]::VK_MENU, 0, [WindowsComputerUseNative]::KEYEVENTF_KEYUP, [UIntPtr]([uint64][WindowsComputerUseNative]::InputMarker))
     if ($env:WCU_CANCEL_EVENT) { [WindowsComputerUseNative]::ThrowIfCancelled() }
     [WindowsComputerUseNative]::SetForegroundWindow($ptr) | Out-Null
     Start-Sleep -Milliseconds 120
   } finally {
-    if ($attached) { [void][WindowsComputerUseNative]::AttachThreadInput($tgtThread, $fgThread, $false) }
+    if ($attached) { [void][WindowsComputerUseNative]::AttachThreadInput($ownThread, $fgThread, $false) }
   }
 
   # Verify the switch actually happened; report it so callers can react.
@@ -737,6 +1593,7 @@ function Activate-TargetIfRequested {
   param([object]$InputObject)
   if ((Has-WindowTarget $InputObject) -and [bool](Get-Prop $InputObject "activate" $false)) {
     $target = Get-ObservationWindow $InputObject
+    Assert-NativeInputTarget ([int64]$target.nativeWindowHandle)
     $ok = Set-WindowForeground $target
     if (-not $ok) {
       $title = [string](Get-Prop $InputObject "windowTitle" "")
@@ -745,15 +1602,73 @@ function Activate-TargetIfRequested {
   }
 }
 
+# Same-process windows are not interchangeable (Explorer, browsers and UWP).
+function Assert-InputProcess {
+  param([int]$ProcessId)
+  if ($ProcessId -le 0) { throw 'INPUT_TARGET_UNAVAILABLE: the target process could not be identified.' }
+  $hostProcess=0
+  [void][int]::TryParse([string]$env:WCU_HOST_PID,[ref]$hostProcess)
+  if ($ProcessId -eq $PID -or ($hostProcess -gt 0 -and $ProcessId -eq $hostProcess) -or
+      ($script:TakeoverProcessId -gt 0 -and $ProcessId -eq $script:TakeoverProcessId)) {
+    throw 'HOST_INPUT_DENIED: desktop input cannot target the DSH host or computer-use helper.'
+  }
+  $checkImage = [bool]$env:WCU_HOST_EXECUTABLE
+  $target = [WindowsComputerUseNative]::ReadInputProcess([uint32]$ProcessId, $checkImage)
+  if ($target.Gone) { throw 'INPUT_TARGET_UNAVAILABLE: the target process has exited. No input was sent.' }
+  if ($checkImage -and $target.ImagePath -and
+      [string]::Equals([IO.Path]::GetFullPath($target.ImagePath),[IO.Path]::GetFullPath($env:WCU_HOST_EXECUTABLE),[StringComparison]::OrdinalIgnoreCase)) {
+    throw 'HOST_INPUT_DENIED: desktop input cannot target a DSH host executable window.'
+  }
+  $currentIntegrity = [WindowsComputerUseNative]::ReadCurrentIntegrity()
+  if ($null -ne $target.Integrity -and $null -ne $currentIntegrity -and $target.Integrity -gt $currentIntegrity) {
+    throw 'ELEVATED_TARGET_DENIED: the target window has a higher Windows integrity level than the input worker. No input was sent.'
+  }
+  if ($target.TokenAccessDenied) {
+    throw 'INPUT_TARGET_ACCESS_UNCONFIRMED: Windows denied access to verify the target integrity level. It may be running as administrator. Open a non-elevated instance if possible. No input was sent.'
+  }
+  if ($null -eq $target.Integrity -or $null -eq $currentIntegrity -or ($checkImage -and -not $target.ImagePath)) {
+    throw 'INPUT_TARGET_ACCESS_UNCONFIRMED: Windows did not allow the target identity or integrity level to be verified. No input was sent.'
+  }
+}
+
+function Assert-NativeInputTarget {
+  param([long]$Hwnd)
+  if (-not $Hwnd -or -not [WindowsComputerUseNative]::IsWindow([IntPtr]$Hwnd)) {
+    throw 'INPUT_TARGET_UNAVAILABLE: no live target window was resolved.'
+  }
+  Assert-InputProcess (Get-WindowProcessId $Hwnd)
+}
+
+function Test-InputWindow {
+  param([long]$Candidate, [long]$Target, [hashtable]$State = $null)
+  if (-not $Candidate -or -not $Target) { return $false }
+  if ($Candidate -eq $Target) { return $true }
+  $owner = $Candidate
+  $seen = @{}
+  for ($depth = 0; $depth -lt 40 -and $owner -and -not $seen.ContainsKey([string]$owner); $depth++) {
+    $seen[[string]$owner] = $true
+    $owner = [WindowsComputerUseNative]::GetWindow([IntPtr]$owner, 4).ToInt64()
+    if ($owner -eq $Target) { return $true }
+  }
+  if ($null -ne $State -and $State.procId -and (Get-WindowProcessId $Candidate) -eq $State.procId -and $State.popups -notcontains $Candidate) {
+    return (@([WindowsComputerUseNative]::VisiblePopups([uint32]$State.procId)) -contains $Candidate)
+  }
+  return $false
+}
+
 function Assert-InFront {
-  # Fail-closed guard right before keystrokes go out: they reach the window in
-  # front, which must still be the one this input is for (or a window of its
-  # process, such as its dialog). The user may have clicked elsewhere meanwhile.
   param([hashtable]$State)
   if (-not $State.target) { return }
   $front = [WindowsComputerUseNative]::GetForegroundWindow().ToInt64()
-  if ($front -ne $State.target -and (Get-WindowProcessId $front) -ne $State.procId) {
+  if (-not (Test-InputWindow $front $State.target $State)) {
     throw 'The target window is no longer in front (another window took the foreground), so no input was sent. Try again.'
+  }
+}
+
+function Assert-ElementFocus {
+  param([object]$Element)
+  if (-not (Invoke-Safe { [bool]$Element.Current.HasKeyboardFocus } $false)) {
+    throw 'ELEMENT_FOCUS_UNCONFIRMED: the requested element did not retain keyboard focus; no replacement text was sent.'
   }
 }
 
@@ -822,16 +1737,30 @@ function Get-WorkWindow {
   return [WindowsComputerUseNative]::GetForegroundWindow().ToInt64()
 }
 
+# A background element action (set_value, invoke, a pattern click, an element
+# scroll) works in a window too: input without a window target goes there next,
+# as after real input. set_value on a field, then keypress Enter, issue #82.
+function Set-WorkWindow {
+  param([long]$Hwnd)
+  if ($Hwnd) { $script:InputWindow = @{ series = $script:WcuSeries; hwnd = [int64]$Hwnd; at = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() } }
+}
+
 # The window that input for this call goes to: the requested target, else the
-# window DSH works in.
+# window DSH works in. $script:InputWindowVia says which, so a result can tell
+# when the keys went to whatever window happened to be in front.
 function Resolve-InputWindow {
   param([object]$InputObject)
   if (Has-WindowTarget $InputObject) {
     $target = Get-ObservationWindow $InputObject
     if ($null -eq $target) { throw 'No native target window found.' }
-    return [int64]$target.nativeWindowHandle
+    $hwnd=[int64]$target.nativeWindowHandle
+    $script:InputWindowVia = 'window target'
+  } else {
+    $hwnd=Get-WorkWindow
+    $script:InputWindowVia = if ($script:InputWindow.hwnd -and $hwnd -eq [int64]$script:InputWindow.hwnd) { 'last DSH window' } else { 'front window' }
   }
-  return (Get-WorkWindow)
+  Assert-NativeInputTarget $hwnd
+  return $hwnd
 }
 
 # Before real input: note the window in front and the pointer, then bring the
@@ -840,18 +1769,42 @@ function Resolve-InputWindow {
 # point, a UIA SetFocus); it is given back all the same.
 function Start-Input {
   param([object]$InputObject, [long]$Hwnd, [switch]$NoActivate)
-  $cursor = New-Object WindowsComputerUseNative+POINT
-  [void][WindowsComputerUseNative]::GetCursorPos([ref]$cursor)
-  $state = @{ user = [WindowsComputerUseNative]::GetForegroundWindow().ToInt64(); target = [int64]$Hwnd; keep = [bool](Get-Prop $InputObject 'activate' $false)
-    cursor = $cursor; moved = $null; borrowed = $false; procId = (Get-WindowProcessId $Hwnd); popups = @() }
-  if ($state.target -and $state.user -ne $state.target) {
-    $state.popups = @([WindowsComputerUseNative]::VisiblePopups([uint32]$state.procId))
-    if (-not $NoActivate -and -not (Set-WindowForeground ([pscustomobject]@{ nativeWindowHandle = $state.target }))) {
-      throw 'The target window could not be brought to the foreground (Windows foreground lock), so no input was sent. Try again, or call activate_window first.'
+  Assert-NativeInputTarget $Hwnd
+  # Low disruption: from here until Complete-Input the user's own keys and
+  # mouse actions are held, then replayed to their window. A modifier or
+  # button they already hold gets a second to come up.
+  if ($script:WcuLowDisruption -and -not $script:WcuHolding -and -not (Get-Prop $InputObject 'activate' $false)) {
+    $script:WcuHolding = [WcuInputHold]::Begin($Hwnd)
+    if ($script:WcuHolding -and -not [WcuInputHold]::WaitForRelease(1000)) {
+      [void](Stop-InputHold)
+      throw 'WCU_USER_INPUT_HELD: The user is holding a key or mouse button, so nothing was sent. Try again in a moment, or use an element action, which needs neither.'
     }
-    $state.borrowed = $true
   }
-  return $state
+  try {
+    $cursor = New-Object WindowsComputerUseNative+POINT
+    [void][WindowsComputerUseNative]::GetCursorPos([ref]$cursor)
+    $state = @{ user = [WindowsComputerUseNative]::GetForegroundWindow().ToInt64(); target = [int64]$Hwnd; keep = [bool](Get-Prop $InputObject 'activate' $false)
+      cursor = $cursor; moved = $null; borrowed = $false; procId = (Get-WindowProcessId $Hwnd); popups = @() }
+    if ($state.procId) { $state.popups = @([WindowsComputerUseNative]::VisiblePopups([uint32]$state.procId)) }
+    if ($state.target -and $state.user -ne $state.target) {
+      if (-not $NoActivate -and -not (Set-WindowForeground ([pscustomobject]@{ nativeWindowHandle = $state.target }))) {
+        throw 'The target window could not be brought to the foreground (Windows foreground lock), so no input was sent. Try again, or call activate_window first.'
+      }
+      $state.borrowed = $true
+    }
+    return $state
+  } catch {
+    if ($script:WcuHolding) { [void](Stop-InputHold) }
+    throw
+  }
+}
+
+# The end of a hold: replays what the user did meanwhile (WcuInputHold::End).
+# $Windows: what DSH worked in. Returns the note for the result, or $null.
+function Stop-InputHold {
+  param([long[]]$Windows = @())
+  $script:WcuHolding = $false
+  return [WcuInputHold]::End([long[]]$Windows)
 }
 
 # Real input lands on whatever shows at the point. With the target in front,
@@ -859,10 +1812,10 @@ function Start-Input {
 # dialog); otherwise nothing is sent. WindowFromPoint skips the DSH indicator,
 # which is layered and click-through.
 function Assert-PointOnTarget {
-  param([int]$X, [int]$Y, [long]$Target)
+  param([int]$X, [int]$Y, [long]$Target, [hashtable]$State = $null)
   if (-not $Target) { return }
   $hit = Get-RootWindowAt $X $Y
-  if ($hit -eq $Target -or ((Get-WindowProcessId $hit) -eq (Get-WindowProcessId $Target))) { return }
+  if (Test-InputWindow $hit $Target $State) { return }
   $title = New-Object System.Text.StringBuilder 256
   [void][WindowsComputerUseNative]::GetWindowText([IntPtr]$hit, $title, 256)
   $class = New-Object System.Text.StringBuilder 128
@@ -870,13 +1823,45 @@ function Assert-PointOnTarget {
   throw "POINT_COVERED: ($X,$Y) shows another window ('$($title.ToString())', class $($class.ToString()), HWND $hit) above the target, so no input was sent. Move or close that window, or pick a point of the target that is not covered."
 }
 
-# After real input: put the pointer back if it is still where DSH left it, and
-# give the foreground back (see the section note). Adds pointer/foreground to
-# the result, saying what was done.
+# After real input, and under Low disruption also the end of the hold, whose
+# note goes to the result as userInput.
 function Complete-Input {
+  param([hashtable]$State, [System.Collections.IDictionary]$Result)
+  try { Complete-BorrowedInput $State $Result }
+  finally {
+    if ($script:WcuHolding) {
+      # What DSH worked in: the target and the menus, lists and dialogs it opened.
+      $windows = @()
+      if ($State.target) { $windows += [int64]$State.target }
+      if ($State.procId) { $windows += @([WindowsComputerUseNative]::VisiblePopups([uint32]$State.procId) | Where-Object { $State.popups -notcontains $_ }) }
+      $note = Stop-InputHold $windows
+      if ($note) { $Result['userInput'] = $note }
+    }
+  }
+}
+
+# Put the pointer back if it is still where DSH left it, and give the
+# foreground back (see the section note). Adds pointer/foreground to the
+# result, saying what was done.
+function Complete-BorrowedInput {
   param([hashtable]$State, [System.Collections.IDictionary]$Result)
   $target = if ($State.target) { $State.target } else { [WindowsComputerUseNative]::GetForegroundWindow().ToInt64() }
   if ($target) { $script:InputWindow = @{ series = $script:WcuSeries; hwnd = [int64]$target; at = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() } }
+  if ($State.drain) {
+    $front = [WindowsComputerUseNative]::GetForegroundWindow()
+    if (Test-InputWindow $front.ToInt64() $State.target $State) {
+      # WM_NULL can return ahead of pending SendInput events. Wait for a paint
+      # on the receiving thread, bounded to avoid holding up a busy app.
+      $paint = [WindowsComputerUseNative]::RequestPaint($front)
+      $limit = if ($paint) { 1200 } else { 150 }
+      $watch = [Diagnostics.Stopwatch]::StartNew()
+      while ($watch.ElapsedMilliseconds -lt $limit -and [WindowsComputerUseNative]::GetForegroundWindow() -eq $front) {
+        if ($paint -and -not [WindowsComputerUseNative]::PaintPending($front)) { break }
+        Start-Sleep -Milliseconds 15
+      }
+      if (-not $paint -or [WindowsComputerUseNative]::PaintPending($front)) { $Result['inputQueue'] = 'unconfirmed' }
+    }
+  }
   if ($null -ne $State.moved) {
     $now = New-Object WindowsComputerUseNative+POINT
     [void][WindowsComputerUseNative]::GetCursorPos([ref]$now)
@@ -888,14 +1873,40 @@ function Complete-Input {
   if (-not $State.borrowed) { return }
   if ($State.keep) { $Result['foreground'] = 'kept in front (activate:true)'; return }
   # Let the target handle the input before deciding.
-  $ignored = [UIntPtr]::Zero
-  for ($i = 0; $i -lt 2; $i++) { [void][WindowsComputerUseNative]::SendMessageTimeout([IntPtr]$State.target, 0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$ignored) }
+  if (-not $State.drain) {
+    $ignored = [UIntPtr]::Zero
+    for ($i = 0; $i -lt 2; $i++) { [void][WindowsComputerUseNative]::SendMessageTimeout([IntPtr]$State.target, 0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$ignored) }
+  }
   $front = [WindowsComputerUseNative]::GetForegroundWindow().ToInt64()
-  if ((Get-WindowProcessId $front) -ne $State.procId) { $Result['foreground'] = 'left: another window is in front now'; return }
+  if (-not (Test-InputWindow $front $State.target $State)) { $Result['foreground'] = 'left: another window is in front now'; return }
   $opened = @([WindowsComputerUseNative]::VisiblePopups([uint32]$State.procId) | Where-Object { $State.popups -notcontains $_ })
   if ([WindowsComputerUseNative]::InMenuMode([IntPtr]$State.target) -or $opened.Count) { $Result['foreground'] = 'kept in front: a menu, list or dialog it opened is showing'; return }
   if (-not ([WindowsComputerUseNative]::IsWindow([IntPtr]$State.user) -and [WindowsComputerUseNative]::IsWindowVisible([IntPtr]$State.user))) { $Result['foreground'] = 'kept in front: the window that was in front is gone'; return }
   $Result['foreground'] = if ([WindowsComputerUseNative]::GiveForeground([IntPtr]$State.user)) { 'returned' } else { 'kept in front: Windows refused to switch back' }
+}
+
+# Where keys or text go: a window and, while it is in front, the control with
+# the keyboard focus there. The control is read through UI Automation only when
+# the window answers messages, so a hung app cannot hold the call. $Via says how
+# the window was chosen (Resolve-InputWindow). Title and name are app text.
+function Get-KeyDestination {
+  param([long]$Hwnd, [string]$Via)
+  $title = New-Object System.Text.StringBuilder 256
+  [void][WindowsComputerUseNative]::GetWindowText([IntPtr]$Hwnd, $title, 256)
+  $text = $title.ToString()
+  if ($text.Length -gt 80) { $text = $text.Substring(0, 80) + '...' }
+  $info = [ordered]@{ nativeWindowHandle = $Hwnd; processId = (Get-WindowProcessId $Hwnd); title = $text }
+  if ($Via) { $info['via'] = $Via }
+  if ([WindowsComputerUseNative]::GetForegroundWindow().ToInt64() -eq $Hwnd -and [WindowsComputerUseNative]::IsResponsive([IntPtr]$Hwnd)) {
+    $focused = Invoke-Safe { [System.Windows.Automation.AutomationElement]::FocusedElement } $null
+    if ($null -ne $focused) {
+      $type = Get-ControlTypeName (Invoke-Safe { $focused.Current.ControlType } $null)
+      $name = [string](Invoke-Safe { $focused.Current.Name } '')
+      if ($name.Length -gt 60) { $name = $name.Substring(0, 60) + '...' }
+      if ($type) { $info['focus'] = if ($name) { "$type '$name'" } else { $type } }
+    }
+  }
+  return $info
 }
 
 # A background element action whose UIA provider may take the foreground or
@@ -907,8 +1918,10 @@ function Invoke-Guarded {
   $cursor = New-Object WindowsComputerUseNative+POINT
   [void][WindowsComputerUseNative]::GetCursorPos([ref]$cursor)
   $procId = [uint32](Invoke-Safe { $Element.Current.ProcessId } 0)
+  Assert-InputProcess $procId
   $popups = @([WindowsComputerUseNative]::VisiblePopups($procId))
   $script:BackgroundReport = [ordered]@{}
+  if ($script:WcuLowDisruption) { [WcuInputHold]::Snapshot() }
   try { return (& $Call) }
   finally {
     $now = New-Object WindowsComputerUseNative+POINT
@@ -925,6 +1938,7 @@ function Invoke-Guarded {
       $opened = @([WindowsComputerUseNative]::VisiblePopups($procId) | Where-Object { $popups -notcontains $_ })
       $script:BackgroundReport['foreground'] = if ([WindowsComputerUseNative]::InMenuMode([IntPtr]$after) -or $opened.Count) { 'kept: the app came forward and a menu, list or dialog it opened is showing' }
         elseif ([WindowsComputerUseNative]::GiveForeground([IntPtr]$front)) { 'returned (the app had come forward)' } else { 'kept: the app came forward and Windows refused to switch back' }
+      if ($script:WcuLowDisruption -and $script:BackgroundReport['foreground'] -like 'kept*' -and [WcuInputHold]::ArmGuard([long[]](@([int64]$after) + $opened), [long[]]@([int64]$procId))) { $script:BackgroundReport['userInput'] = [WcuInputHold]::GuardNote }
     }
   }
 }
@@ -1046,7 +2060,7 @@ function Focus-TextControl {
 # ============================================================================
 
 $script:WindowCache = @{}   # hwnd -> @{ x=..; y=..; ts=.. }
-$script:OcrAwait = $null    # WinRT AsTask helper (filled lazily by Get-OcrEngine)
+$script:WindowObservations = @{} # immutable token -> window identity and origin
 
 function Get-FreshWindowRect {
   param([object]$Element)
@@ -1063,31 +2077,45 @@ function Get-FreshWindowRect {
 
 function Update-WindowCache {
   param([object]$Element)
-  $hwnd = if (Get-Prop $Element 'nativeWindowHandle' 0) { [int64]$Element.nativeWindowHandle } else { Invoke-Safe { [int64]$Element.Current.NativeWindowHandle } 0 }
-  if (-not ($hwnd -and $hwnd -ne 0)) { return }
+  $hwnd = if (Get-Prop $Element 'nativeWindowHandle' 0) { [int64]$Element.nativeWindowHandle } else { Invoke-Safe { $Element.Current.NativeWindowHandle } 0 }
+  if (-not $hwnd) { return }
   $rect = Get-FreshWindowRect $Element
   if ($null -eq $rect) { return }
-  $script:WindowCache[[string]$hwnd] = @{ x = $rect.x; y = $rect.y; ts = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() }
+  if ($null -eq $script:WindowObservations) { $script:WindowObservations=@{} }
+  $token=[Guid]::NewGuid().ToString('N')
+  $owner=[uint32](Get-Prop $Element 'processId' 0)
+  if (-not $owner) { [void][WindowsComputerUseNative]::GetWindowThreadProcessId([IntPtr]$hwnd,[ref]$owner) }
+  $entry=@{token=$token;x=$rect.x;y=$rect.y;hwnd=$hwnd;processId=$owner;ts=[DateTimeOffset]::Now.ToUnixTimeMilliseconds()}
+  $script:WindowCache[[string]$hwnd]=$entry
+  $script:WindowObservations[$token]=$entry
+  if ($Element -is [System.Collections.IDictionary]) { $Element['observationToken']=$token }
+  if ($script:WindowObservations.Count -gt 512) {
+    foreach ($old in @($script:WindowObservations.GetEnumerator() | Sort-Object { [long]$_.Value.ts } | Select-Object -First 128)) {
+      $script:WindowObservations.Remove($old.Key)
+    }
+  }
 }
 
 function Home-Point {
-  # If the target window was observed before and has since moved, shift the
-  # given screen point by (dx, dy). Returns @{ x=..; y=..; homed=$null or @{dx=..;dy=..} }.
-  param([int]$X, [int]$Y, [object]$Target)
-  $result = [ordered]@{ x = $X; y = $Y; homed = $null }
-  $hwnd = if (Get-Prop $Target 'nativeWindowHandle' 0) { [int64]$Target.nativeWindowHandle } else { Invoke-Safe { [int64]$Target.Current.NativeWindowHandle } 0 }
-  if (-not ($hwnd -and $hwnd -ne 0)) { return $result }
-  $key = [string]$hwnd
-  $cached = $script:WindowCache[$key]
-  if ($null -eq $cached) { return $result }
-  $now = Get-FreshWindowRect $Target
-  if ($null -eq $now) { return $result }
-  $dx = $now.x - [int]$cached.x
-  $dy = $now.y - [int]$cached.y
+  # A point is already in current screen coordinates unless the caller
+  # explicitly binds it to the origin of a previous observation.
+  param([int]$X,[int]$Y,[object]$Target,[string]$ObservationToken='')
+  $result=[ordered]@{x=$X;y=$Y;homed=$null}
+  if (-not $ObservationToken) { return $result }
+  $hwnd=if(Get-Prop $Target 'nativeWindowHandle' 0){[int64]$Target.nativeWindowHandle}else{Invoke-Safe {$Target.Current.NativeWindowHandle} 0}
+  $cached=$script:WindowObservations[$ObservationToken]
+  if ($null -eq $cached -or [int64]$cached.hwnd -ne $hwnd -or ([DateTimeOffset]::Now.ToUnixTimeMilliseconds()-[long]$cached.ts) -gt 300000) {
+    throw 'OBSERVATION_TOKEN_STALE: re-observe the target and use its token or current screen coordinates.'
+  }
+  $owner=[uint32]0
+  [void][WindowsComputerUseNative]::GetWindowThreadProcessId([IntPtr]$hwnd,[ref]$owner)
+  if ($owner -ne [uint32]$cached.processId) { throw 'OBSERVATION_TOKEN_STALE: the target process changed.' }
+  $now=Get-FreshWindowRect $Target
+  if ($null -eq $now) { throw 'OBSERVATION_TOKEN_STALE: the target geometry is unavailable.' }
+  $dx=$now.x-[int]$cached.x;$dy=$now.y-[int]$cached.y
   if ($dx -ne 0 -or $dy -ne 0) {
-    $result.x = $X + $dx
-    $result.y = $Y + $dy
-    $result.homed = [ordered]@{ dx = $dx; dy = $dy }
+    $result.x=$X+$dx;$result.y=$Y+$dy
+    $result.homed=[ordered]@{dx=$dx;dy=$dy;observationToken=$ObservationToken}
   }
   return $result
 }
@@ -1185,6 +2213,7 @@ function Resolve-TargetHwnd {
   param([object]$InputObject)
   $target = Get-ObservationWindow $InputObject
   if ($null -eq $target) { throw 'No native target window found.' }
+  Assert-NativeInputTarget ([int64]$target.nativeWindowHandle)
   return [int64]$target.nativeWindowHandle
 }
 
@@ -1194,6 +2223,7 @@ function Post-BackgroundClick {
   # messages were queued. The app may still ignore them (Chromium/Electron/
   # UWP) — callers must label the result as unverified.
   param([long]$Hwnd, [int]$X, [int]$Y, [string]$Button, [int]$Count)
+  Assert-NativeInputTarget $Hwnd
   $ptr = [IntPtr]$Hwnd
   $pt = New-Object WindowsComputerUseNative+POINT
   $pt.x = $X
@@ -1235,6 +2265,7 @@ function Post-BackgroundClick {
 # may be the window itself (Chromium), but never a window outside the target.
 function Get-BackgroundKeyTarget {
   param([long]$Hwnd)
+  Assert-NativeInputTarget $Hwnd
   $focus = [WindowsComputerUseNative]::FocusedWindow([IntPtr]$Hwnd).ToInt64()
   if (-not $focus -or (Get-RootWindow $focus) -ne (Get-RootWindow $Hwnd)) {
     throw "background_unavailable: no control in the target window has the keyboard focus, so posted characters would reach nothing. Focus a field first (focus or click), or use method:'auto' / dispatch:'foreground'."
@@ -1252,6 +2283,87 @@ function Get-EditTextLength {
   $reply = [UIntPtr]::Zero
   if ([WindowsComputerUseNative]::SendMessageTimeout([IntPtr]$Hwnd, [WindowsComputerUseNative]::WM_GETTEXTLENGTH, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$reply) -eq [IntPtr]::Zero) { return $null }
   return [int64]$reply.ToUInt64()
+}
+
+# Capture the expected post-input value of a small, plain Win32 edit. Treat
+# password fields and unsupported or ambiguous reads as unverified.
+function Get-SendInputEdit {
+  param([IntPtr]$Focus, [string]$Text)
+  if ($Focus -eq [IntPtr]::Zero -or $Text -match '\p{Cc}') { return $null }
+  $class = New-Object System.Text.StringBuilder 128
+  [void][WindowsComputerUseNative]::GetClassName($Focus, $class, 128)
+  if ($class.ToString() -notmatch $script:NativeEditClass) { return $null }
+  if (([WindowsComputerUseNative]::GetWindowLong($Focus, -16) -band 0x0020) -ne 0) { return $null } # ES_PASSWORD
+  $reply = [UIntPtr]::Zero
+  # EM_GETPASSWORDCHAR can identify a password mask installed at runtime.
+  if ([WindowsComputerUseNative]::SendMessageTimeout($Focus, 0x00D2, [UIntPtr]::Zero, [IntPtr]::Zero, 3, 100, [ref]$reply) -eq [IntPtr]::Zero -or $reply.ToUInt64() -ne 0) { return $null }
+  if ([WindowsComputerUseNative]::SendMessageTimeout($Focus, [WindowsComputerUseNative]::WM_GETTEXTLENGTH, [UIntPtr]::Zero, [IntPtr]::Zero, 3, 100, [ref]$reply) -eq [IntPtr]::Zero -or $reply.ToUInt64() + $Text.Length -gt 32768) { return $null }
+  # Leave room for text the application adds itself, such as an autocomplete suffix.
+  $capacity = [int]$reply.ToUInt64() + $Text.Length + 1026
+  $before = [WindowsComputerUseNative]::ReadEditText($Focus, $capacity)
+  if ($null -eq $before) { return $null }
+  # RichEdit may count a line break as one selection unit but return CRLF in text.
+  if ($class.ToString() -match 'RichEdit' -and $before -match "[`r`n]") { return $null }
+  $selection = [WindowsComputerUseNative]::ReadEditSelection($Focus)
+  if ($null -eq $selection) { return $null }
+  $start, $end = $selection
+  if ($start -gt $end -or $end -gt $before.Length) { return $null }
+  $head = $before.Substring(0, $start) + $Text
+  $tail = $before.Substring($end)
+  $expected = $head + $tail
+  if ([string]::Equals($expected, $before, [StringComparison]::Ordinal)) { return $null }
+  return @{ expected = $expected; head = $head; tail = $tail; capacity = $capacity }
+}
+
+# SendInput returns once the keys sit in the target thread's input queue, but
+# a key reaches whichever window has the focus when that thread takes it out.
+# Giving the foreground back before then drops the rest of the text or sends
+# it elsewhere (issue #90). So the foreground stays until the target has taken
+# the keys; a repaint requested now arrives only after the last one.
+#  - A readable edit is done once it holds the expected text. The wait goes on
+#    while its text changes or the repaint is pending. After the repaint, reads
+#    that show no change for 400 ms mean the keys are used up.
+#  - Any other control waits at least 150 ms and until the repaint.
+# The cap grows with the text. A foreground or focus change ends the wait.
+# Returns 'observed', 'changed' (all typed text arrived, and the application
+# added text or changed letter case), 'incomplete', or $null (not verified).
+function Wait-SendInputEdit {
+  param([IntPtr]$Front, [IntPtr]$Focus, [hashtable]$Edit, [int]$Length = 1)
+  $wait = [Diagnostics.Stopwatch]::StartNew()
+  $paint = [WindowsComputerUseNative]::RequestPaint($Focus)
+  $limit = if ($null -eq $Edit) { [Math]::Min(5000, 150 + 50 * $Length) } else { [Math]::Min(15000, 1000 + 50 * $Length) }
+  $classify = {
+    param([string]$Value)
+    if ([string]::Equals($Value, $Edit.expected, [StringComparison]::OrdinalIgnoreCase) -or
+        ($Value.Length -gt $Edit.expected.Length -and $Value.StartsWith($Edit.head, [StringComparison]::Ordinal) -and $Value.EndsWith($Edit.tail, [StringComparison]::Ordinal))) { 'changed' } else { 'incomplete' }
+  }
+  $last = $null
+  $still = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    [void](Test-Failsafe)
+    if ([WindowsComputerUseNative]::GetForegroundWindow() -ne $Front -or [WindowsComputerUseNative]::FocusedWindow($Front) -ne $Focus) {
+      if ($null -eq $Edit) { return $null }
+      $value = [WindowsComputerUseNative]::ReadEditText($Focus, $Edit.capacity)
+      if ($null -ne $value -and [string]::Equals($value, $Edit.expected, [StringComparison]::Ordinal)) { return 'observed' }
+      return 'incomplete'
+    }
+    $taken = -not ($paint -and [WindowsComputerUseNative]::PaintPending($Focus))
+    if ($null -eq $Edit) {
+      if ($taken -and $wait.ElapsedMilliseconds -ge 150) { return $null }
+      Start-Sleep -Milliseconds 10
+    } else {
+      $value = [WindowsComputerUseNative]::ReadEditText($Focus, $Edit.capacity)
+      if ($null -ne $value) {
+        if ([string]::Equals($value, $Edit.expected, [StringComparison]::Ordinal)) { return 'observed' }
+        if ($null -eq $last -or -not [string]::Equals($value, $last, [StringComparison]::Ordinal)) { $last = $value; $still.Restart() }
+        elseif ($taken -and $still.ElapsedMilliseconds -ge 400) { return (& $classify $value) }
+      }
+      Start-Sleep -Milliseconds 25
+    }
+  } while ($wait.ElapsedMilliseconds -lt $limit)
+  if ($null -eq $last) { return $null }
+  if ($still.ElapsedMilliseconds -ge 400 -and -not ($paint -and [WindowsComputerUseNative]::PaintPending($Focus))) { return (& $classify $last) }
+  return 'incomplete'
 }
 
 # Posted characters arrive after the post returns. For a Win32 edit, wait up
@@ -1276,6 +2388,7 @@ function Post-BackgroundText {
   # no foreground, no system input queue. Works on controls that accept char
   # input (Edit, RichEdit, most Win32 dialogs).
   param([long]$Hwnd, [string]$Text)
+  Assert-NativeInputTarget $Hwnd
   $ptr = [IntPtr]$Hwnd
   $allOk = $true
   foreach ($ch in $Text.ToCharArray()) {
@@ -1432,15 +2545,27 @@ public static class WindowsComputerUseOcr {
   //   SCALE\t<factor the image was read at>
   //   LINE\t<line text>\t<word>\x1E<x>,<y>,<w>,<h>\x1F<word>\x1E...
   public static string Recognize(string pngPath, string languageTag) {
+    StorageFile file = WaitOp(StorageFile.GetFileFromPathAsync(pngPath));
+    using (IRandomAccessStream stream = WaitOp(file.OpenAsync(FileAccessMode.Read))) return RecognizeStream(stream,languageTag);
+  }
+  public static string RecognizeBytes(byte[] png, string languageTag) {
+    using (IRandomAccessStream stream = new InMemoryRandomAccessStream()) {
+      using (var writer = new DataWriter(stream)) {
+        writer.WriteBytes(png); WaitOp(writer.StoreAsync()); writer.DetachStream();
+      }
+      stream.Seek(0); return RecognizeStream(stream,languageTag);
+    }
+  }
+  private static string RecognizeStream(IRandomAccessStream stream, string languageTag) {
     try {
       OcrEngine engine = CreateEngine(languageTag);
-      StorageFile file = WaitOp(StorageFile.GetFileFromPathAsync(pngPath));
-      using (IRandomAccessStream stream = WaitOp(file.OpenAsync(FileAccessMode.Read))) {
+      {
         BitmapDecoder decoder = WaitOp(BitmapDecoder.CreateAsync(stream));
         int width = (int)decoder.PixelWidth, height = (int)decoder.PixelHeight;
         double maxDimension = OcrEngine.MaxImageDimension;
         double scale = Math.Min(1, Fit(width, height, maxDimension));
-        OcrResult result = WaitOp(engine.RecognizeAsync(Decode(decoder, width, height, scale)));
+        OcrResult result;
+        using (var bitmap = Decode(decoder, width, height, scale)) result = WaitOp(engine.RecognizeAsync(bitmap));
         var heights = new List<double>();
         foreach (OcrLine line in result.Lines)
           foreach (OcrWord word in line.Words)
@@ -1448,7 +2573,7 @@ public static class WindowsComputerUseOcr {
         double larger = ReadScale(heights.ToArray(), width, height, maxDimension);
         if (larger > scale * 1.2) {
           scale = larger;
-          result = WaitOp(engine.RecognizeAsync(Decode(decoder, width, height, scale)));
+          using (var bitmap = Decode(decoder, width, height, scale)) result = WaitOp(engine.RecognizeAsync(bitmap));
         }
         string tag = engine.RecognizerLanguage.LanguageTag;
         bool spaced = UsesSpaces(tag);
@@ -1482,7 +2607,8 @@ public static class WindowsComputerUseOcr {
 function Get-OcrHelper {
   # Compile (once, cached) and load the C# WinRT OCR helper.
   if ("WindowsComputerUseOcr" -as [type]) { return }
-  $dll = Join-Path $env:TEMP ("wcu-ocr-" + (Get-CsHash -Source $script:WcuOcrCs) + ".dll")
+  if ((Get-Command Import-PackagedHelper -ErrorAction SilentlyContinue) -and (Import-PackagedHelper -Name ocr -Source $script:WcuOcrCs)) { return }
+  $dll = Join-Path (Get-HelperCacheDir) ("wcu-ocr-" + (Get-CsHash -Source $script:WcuOcrCs) + ".dll")
   Import-HelperAssembly -Path $dll -Compile {
     param($target)
     $wd = "C:\Windows\System32\WinMetadata"
@@ -1522,10 +2648,11 @@ function Get-OcrHelper {
 function Invoke-Ocr {
   # OCR a PNG file; word boxes come back in the image's pixel coordinates.
   # Language: an installed recognizer tag or its prefix; empty = Windows user languages.
-  param([string]$PngPath, [string]$Language = '')
+  param([string]$PngPath, [string]$Language = '', [byte[]]$PngBytes = $null)
   Get-OcrHelper
-  $raw = [WindowsComputerUseOcr]::Recognize($PngPath, $Language)
-  $linesOut = @()
+  $raw = if ($null -ne $PngBytes) { [WindowsComputerUseOcr]::RecognizeBytes($PngBytes, $Language) } else { [WindowsComputerUseOcr]::Recognize($PngPath, $Language) }
+  $linesOut = New-Object System.Collections.Generic.List[object]
+  $lineTexts = New-Object System.Collections.Generic.List[string]
   $lang = ""
   $readScale = 1.0
   foreach ($line in ($raw -split "`r?`n")) {
@@ -1533,7 +2660,7 @@ function Invoke-Ocr {
     if ($line -match '^SCALE\t(.*)$') { $readScale = [double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture); continue }
     if ($line -match '^LINE\t(.*)\t(.*)$') {
       $lineText = $Matches[1]
-      $words = @()
+      $words = New-Object System.Collections.Generic.List[object]
       # Words are separated by U+001F and text from its box by U+001E, so OCR
       # text may hold any printable character.
       foreach ($w in $Matches[2].Split([char]0x1F)) {
@@ -1543,12 +2670,13 @@ function Invoke-Ocr {
         $wtext = $w.Substring(0, $at)
         $coords = $w.Substring($at + 1) -split ','
         if ($coords.Count -lt 4) { continue }
-        $words += [ordered]@{ text = $wtext; x = [int]$coords[0]; y = [int]$coords[1]; width = [int]$coords[2]; height = [int]$coords[3] }
+        $words.Add([ordered]@{ text = $wtext; x = [int]$coords[0]; y = [int]$coords[1]; width = [int]$coords[2]; height = [int]$coords[3] })
       }
-      $linesOut += [ordered]@{ text = $lineText; words = $words }
+      $lineTexts.Add($lineText)
+      $linesOut.Add([ordered]@{ text = $lineText; words = $words.ToArray() })
     }
   }
-  return [ordered]@{ text = (@($linesOut | ForEach-Object { $_.text }) -join "`n"); lines = $linesOut; language = $lang; readScale = $readScale }
+  return [ordered]@{ text = ($lineTexts.ToArray() -join "`n"); lines = $linesOut.ToArray(); language = $lang; readScale = $readScale }
 }
 
 function Get-OcrWordBounds {
@@ -1586,235 +2714,87 @@ function Find-OcrWordRun {
   if ($start -lt 0) { return $null }
   $end = $start + $normalizedQuery.Length
   $offset = 0
-  $hitWords = @()
+  $hitWords = New-Object System.Collections.Generic.List[object]
+  $hitTexts = New-Object System.Collections.Generic.List[string]
   for ($index = 0; $index -lt $Words.Count; $index++) {
     $length = $parts[$index].Length
     if ($length -gt 0 -and $offset -lt $end -and ($offset + $length) -gt $start) {
-      $hitWords += $Words[$index]
+      $w = $Words[$index]
+      $hitWords.Add($w)
+      $hitTexts.Add([string]$w.text)
     }
     $offset += $length
   }
-  $bounds = Get-OcrWordBounds -Words $hitWords
+  $hitArr = $hitWords.ToArray()
+  $bounds = Get-OcrWordBounds -Words $hitArr
   if ($null -eq $bounds) { return $null }
-  return [ordered]@{text=($hitWords.text -join ' ');boundingBox=$bounds}
+  return [ordered]@{text=($hitTexts.ToArray() -join ' ');boundingBox=$bounds}
 }
 
-# ============================================================================
-# WGC window capture (Windows.Graphics.Capture): the fallback for surfaces
-# that PrintWindow renders pitch black (UWP / WinUI / DirectComposition).
-# Compiled to a cached DLL like the OCR helper; runs a short-lived STA pump
-# thread to receive the WinRT FrameArrived event, grabs one frame, saves a PNG.
-# ============================================================================
-$script:WgcCs = @'
-using System;
-using System.Threading;
-using System.Runtime.InteropServices;
-using System.Drawing;
-using System.Drawing.Imaging;
-using Windows.Foundation;
-using Windows.Graphics;
-using Windows.Graphics.Capture;
-using Windows.Graphics.DirectX;
-using Windows.Graphics.DirectX.Direct3D11;
-using Windows.Graphics.Imaging;
-
-public static class WgcCapture {
-  const uint QS_ALLINPUT = 0x04FF;
-  const uint WM_DESTROY = 0x0002;
-
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-  struct WNDCLASSEX {
-    public uint cbSize; public uint style; public IntPtr lpfnWndProc;
-    public int cbClsExtra; public int cbWndExtra; public IntPtr hInstance;
-    public IntPtr hIcon; public IntPtr hCursor; public IntPtr hbrBackground;
-    public String lpszMenuName; public String lpszClassName; public IntPtr hIconSm;
-  }
-  [StructLayout(LayoutKind.Sequential)]
-  struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int ptX; public int ptY; }
-
-  [DllImport("user32.dll")] static extern bool RegisterClassEx(ref WNDCLASSEX wc);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint ex, string cls, string title, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr hInst, IntPtr param);
-  [DllImport("user32.dll")] static extern IntPtr DefWindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-  [DllImport("user32.dll")] static extern int MsgWaitForMultipleObjects(int count, WaitHandle[] handles, bool wake, uint ms, uint flags);
-  [DllImport("user32.dll")] static extern int GetMessage(out MSG msg, IntPtr hwnd, uint min, uint max);
-  [DllImport("user32.dll")] static extern bool TranslateMessage(ref MSG msg);
-  [DllImport("user32.dll")] static extern IntPtr DispatchMessage(ref MSG msg);
-  [DllImport("user32.dll")] static extern void PostQuitMessage(int code);
-
-  delegate IntPtr WindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-  static IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam) {
-    if (msg == WM_DESTROY) { PostQuitMessage(0); return IntPtr.Zero; }
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-  }
-
-  // Capture one frame of the window to a PNG. Returns the PNG path on success,
-  // null on timeout / no frame, throws on setup failure.
-  public static string CaptureWindow(uint hwnd, int width, int height, string outPng, int timeoutMs) {
-    ManualResetEvent done = new ManualResetEvent(false);
-    Exception[] error = new Exception[1];
-    bool[] got = new bool[1];
-
-    Thread pump = new Thread(delegate () {
-      try {
-        WNDCLASSEX wc = new WNDCLASSEX();
-        wc.cbSize = (uint)Marshal.SizeOf(typeof(WNDCLASSEX));
-        wc.lpfnWndProc = new WindowProc(WndProc);
-        wc.lpszClassName = "WgcCapturePump" + Guid.NewGuid().ToString("N");
-        RegisterClassEx(ref wc);
-        CreateWindowEx(0, wc.lpszClassName, "wgc", 0, -32000, -32000, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-
-        GraphicsCaptureItem item = GraphicsCaptureItem.CreateFromWindowId(hwnd);
-        SizeInt32 size;
-        item.TryGetClosestSize((uint)width, out size);
-
-        IDirect3DDevice device = null;
-        Direct3D11FeatureLevel fl;
-        Direct3D11CreateDevice(IntPtr.Zero, Direct3D11DriverType.Hardware, null, out device, out fl);
-
-        GraphicsCaptureSession session = GraphicsCaptureSession.CreateAsync(item).GetAwaiter().GetResult();
-        Direct3D11CaptureFramePool pool = Direct3D11CaptureFramePool.Create(device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, size);
-        session.IsBorderRequired = false;
-        try { session.IsCursorCaptureEnabled = true; } catch { }
-        session.StartCapture(pool);
-
-        pool.FrameArrived += delegate (Direct3D11CaptureFramePool sender, object args) {
-          Direct3D11CaptureFrame frame = null;
-          pool.TryGetNextFrame(out frame);
-          try {
-            if (frame != null) {
-              IDirect3DSurface surface = frame.Surface;
-              SoftwareBitmap bitmap = surface.AsSoftwareBitmap();
-              int w = (int)bitmap.PixelWidth;
-              int h = (int)bitmap.PixelHeight;
-              int len = w * h * 4;
-              PixelDataProvider provider = new PixelDataProvider();
-              IntPtr head;
-              bitmap.GetPixelData((uint)len, provider, out head);
-              byte[] data = new byte[len];
-              Marshal.Copy(head, data, 0, len);
-              Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
-              BitmapData bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-              Marshal.Copy(data, 0, bd.Scan0, len);
-              bmp.UnlockBits(bd);
-              bmp.Save(outPng, ImageFormat.Png);
-              got[0] = true;
-            }
-          } catch (Exception ex) {
-            error[0] = ex;
-          } finally {
-            done.Set();
-            PostQuitMessage(got[0] ? 0 : 1);
-          }
-        };
-
-        // Pump until the frame event or the timeout.
-        bool finished = false;
-        while (!finished) {
-          int wait = MsgWaitForMultipleObjects(1, new WaitHandle[] { done }, false, 400, QS_ALLINPUT);
-          if (wait == 0) { finished = true; break; }          // frame event
-          if (wait == 0x102) { finished = true; break; }        // timeout slice
-          MSG msg;
-          while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { TranslateMessage(ref msg); DispatchMessage(ref msg); }
-        }
-        try { session.Dispose(); pool.Dispose(); device.Dispose(); } catch { }
-      } catch (Exception ex) {
-        error[0] = ex;
-        done.Set();
-      }
-    });
-    pump.IsBackground = true;
-    pump.SetApartmentState(ApartmentState.STA);
-    pump.Start();
-
-    if (!done.WaitOne(timeoutMs)) {
-      return null; // timeout: no frame arrived
-    }
-    if (error[0] != null) throw new Exception("WGC capture failed: " + error[0].Message, error[0]);
-    return got[0] ? outPng : null;
-  }
-}
-'@
-
-function Get-WgcHelper {
-  if ("WgcCapture" -as [type]) { return }
-  if ($script:WgcCompileFailed) { throw "WGC helper previously failed to compile (missing .NET Core reference pack); WGC capture is disabled on this machine." }
-  $dll = Join-Path $env:TEMP ("wcu-wgc-" + (Get-CsHash -Source $script:WgcCs) + ".dll")
-  Import-HelperAssembly -Path $dll -Compile {
-    param($target)
-    $wd = "C:\Windows\System32\WinMetadata"
-    # Reference whichever graphics winmds exist: older Windows ships separate
-    # Windows.Graphics.{DirectX,Direct3D11,Imaging,Capture}.winmd; Windows 11
-    # 24H2+ consolidates them into Windows.Graphics.winmd.
-    $cands = @("Windows.Graphics.Capture.winmd","Windows.Graphics.DirectX.Direct3D11.winmd","Windows.Graphics.DirectX.winmd","Windows.Graphics.Imaging.winmd","Windows.Graphics.winmd","Windows.Foundation.winmd")
-    $need = @()
-    foreach ($c in $cands) { if (Test-Path (Join-Path $wd $c)) { $need += (Join-Path $wd $c) } }
-    if ($need.Count -lt 2) { throw "WGC unavailable: not enough WinRT graphics winmd found in $wd (requires Windows 10 1903+)." }
-    $fw = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
-    $csc = Join-Path $fw "csc.exe"
-    if (-not (Test-Path $csc)) { throw "WGC unavailable: csc.exe not found." }
-    $src = "$target.cs"
-    [System.IO.File]::WriteAllText($src, $script:WgcCs)
-    $refArgs = $need | ForEach-Object { "/r:" + $_ }
-    $refArgs += @("/r:System.dll", "/r:System.Drawing.dll", "/r:System.Runtime.WindowsRuntime.dll")
-    # The consolidated WinRT winmds reference the .NET Core System.Runtime
-    # facade (4.0.0.0, token b03f5f7f11d50a3f); the .NET Framework csc needs a
-    # matching reference from the .NET Core REFERENCE pack (the shared runtime's
-    # implementation assemblies pull in the non-referenceable
-    # System.Private.CoreLib, so only the Microsoft.NETCore.App.Ref pack works).
-    # If the ref pack is absent the compile fails and the capture chain degrades
-    # to the screen-region fallback (handled by the caller's Invoke-Safe).
-    $refPack = "C:\Program Files\dotnet\packs\Microsoft.NETCore.App.Ref"
-    if (Test-Path $refPack) {
-      $coreRef = Get-ChildItem $refPack -Recurse -Filter "System.Runtime.dll" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
-      if ($coreRef) { $refArgs += ("/r:" + $coreRef) }
-    }
-    $cscArgs = @("/nologo", "/target:library", "/out:$target") + $refArgs + @($src)
-    $out = & $csc $cscArgs 2>&1
-    Remove-TempFile $src
-    if ($LASTEXITCODE -ne 0) {
-      $msg = (($out | Out-String).Trim())
-      $script:WgcCompileFailed = $true
-      throw "WGC helper compile failed: " + $msg.Substring(0, [Math]::Min(300, $msg.Length))
-    }
-  }
-}
-
-function Invoke-WgcCapture {
-  # Capture one frame of the window via Windows.Graphics.Capture. Returns the
-  # PNG path on success, $null on timeout / no frame, throws on setup failure.
-  param([long]$Hwnd, [int]$Width, [int]$Height, [string]$OutPng, [int]$TimeoutMs = 4000)
-  Get-WgcHelper
-  return [WgcCapture]::CaptureWindow([uint32]$Hwnd, [int]$Width, [int]$Height, $OutPng, [int]$TimeoutMs)
-}
-
-
+# Shown top-level windows in Z order; -IncludeMinimized adds minimized ones
+# (minimized: true; list_windows lists them, issue #82), -IncludeInvisible hidden
+# ones too. $script:WindowListTruncated says whether MaxWindows left some out.
 function Get-NativeWindowList {
-  param([bool]$IncludeInvisible = $false, [int]$MaxWindows = 50, [switch]$RecordObservation)
+  param([bool]$IncludeInvisible = $false, [int]$MaxWindows = 50, [switch]$RecordObservation, [bool]$IncludeMinimized = $false)
   $items = New-Object System.Collections.Generic.List[object]
+  $script:WindowListTruncated = $false
   $foreground = [WindowsComputerUseNative]::GetForegroundWindow()
+  $title = New-Object System.Text.StringBuilder 2048
+  $class = New-Object System.Text.StringBuilder 256
+  $rect = New-Object WindowsComputerUseNative+RECT
   foreach ($handle in [WindowsComputerUseNative]::TopLevelWindows()) {
     $visible = [WindowsComputerUseNative]::IsWindowVisible($handle)
-    if (-not $IncludeInvisible -and (-not $visible -or [WindowsComputerUseNative]::IsIconic($handle))) { continue }
-    $title = New-Object System.Text.StringBuilder 2048
-    [void][WindowsComputerUseNative]::GetWindowText($handle, $title, $title.Capacity)
-    $class = New-Object System.Text.StringBuilder 256
-    [void][WindowsComputerUseNative]::GetClassName($handle, $class, $class.Capacity)
-    $rect = New-Object WindowsComputerUseNative+RECT
-    if (-not [WindowsComputerUseNative]::GetWindowRect($handle, [ref]$rect)) { continue }
+    $iconic = [WindowsComputerUseNative]::IsIconic($handle)
+    if (-not $IncludeInvisible -and (-not $visible -or ($iconic -and -not $IncludeMinimized))) { continue }
     $ownerId = [uint32]0
     [void][WindowsComputerUseNative]::GetWindowThreadProcessId($handle, [ref]$ownerId)
     if (-not $ownerId) { continue }
+    if (-not [WindowsComputerUseNative]::GetWindowRect($handle, [ref]$rect)) { continue }
+    if ($items.Count -ge $MaxWindows) { $script:WindowListTruncated = $true; break }
+    $title.Length = 0
+    [void][WindowsComputerUseNative]::GetWindowText($handle, $title, $title.Capacity)
+    $class.Length = 0
+    [void][WindowsComputerUseNative]::GetClassName($handle, $class, $class.Capacity)
     $hwnd = $handle.ToInt64()
     $box = [ordered]@{ x=$rect.left; y=$rect.top; width=$rect.right-$rect.left; height=$rect.bottom-$rect.top; centerX=($rect.left+$rect.right)/2; centerY=($rect.top+$rect.bottom)/2 }
-    $items.Add([ordered]@{id="uia:hwnd:${hwnd}:pid:${ownerId}"; depth=1; name=$title.ToString(); className=$class.ToString(); controlType='Window'; processId=$ownerId; nativeWindowHandle=$hwnd; boundingBox=$box; isEnabled=[WindowsComputerUseNative]::IsWindowEnabled($handle); isOffscreen=(-not $visible -or [WindowsComputerUseNative]::IsIconic($handle)); hasKeyboardFocus=($foreground -eq $handle); source='win32'})
+    $entry = [ordered]@{id="uia:hwnd:${hwnd}:pid:${ownerId}"; depth=1; name=$title.ToString(); className=$class.ToString(); controlType='Window'; processId=$ownerId; nativeWindowHandle=$hwnd; boundingBox=$box; isEnabled=[WindowsComputerUseNative]::IsWindowEnabled($handle); isOffscreen=(-not $visible -or $iconic); hasKeyboardFocus=($foreground -eq $handle); source='win32'}
+    if ($iconic) { $entry['minimized'] = $true }
+    $items.Add($entry)
     # Target lookup must not replace the coordinates used by Home-Point.
-    # Only explicit observations establish a new coordinate baseline.
-    if ($RecordObservation) {
-      $script:WindowCache[[string]$hwnd] = @{ x=$rect.left; y=$rect.top; ts=[DateTimeOffset]::Now.ToUnixTimeMilliseconds() }
+    # Only explicit observations establish a new coordinate baseline. A
+    # minimized window sits at -32000,-32000, so it sets no baseline.
+    if ($RecordObservation -and -not $iconic) {
+      Update-WindowCache $items[$items.Count - 1]
     }
-    if ($items.Count -ge $MaxWindows) { break }
   }
   return ,$items
+}
+
+function Select-TargetWindow {
+  param([object]$InputObject)
+  $found = @((Get-NativeWindowList -IncludeInvisible $true -MaxWindows 4096) | Where-Object { Test-TargetMatch $_ $InputObject })
+  if (-not $found.Count) { throw 'No top-level window matched the requested target.' }
+  $title = [string](Get-Prop $InputObject 'windowTitle' '')
+  if (-not [string]::IsNullOrWhiteSpace($title)) {
+    $exact = @($found | Where-Object { [string]::Equals([string]$_.name, $title, [StringComparison]::OrdinalIgnoreCase) })
+    $prefix = @($found | Where-Object { ([string]$_.name).StartsWith($title, [StringComparison]::OrdinalIgnoreCase) })
+    if ($exact.Count) { $found = $exact } elseif ($prefix.Count) { $found = $prefix }
+  }
+  # Every GUI process also owns hidden IME, DDE and helper windows, and some
+  # keep tiny untitled windows visible, so a process id alone matches several.
+  # Ambiguity counts only among the windows a person could mean: titled shown
+  # windows first, then titled minimized ones, then all of them.
+  if ($found.Count -gt 1) {
+    $shown = @($found | Where-Object { -not $_.isOffscreen -and $_.boundingBox.width -ge 32 -and $_.boundingBox.height -ge 32 -and -not [string]::IsNullOrWhiteSpace([string]$_.name) })
+    $minimized = @($found | Where-Object { $_.isOffscreen -and -not [string]::IsNullOrWhiteSpace([string]$_.name) -and [WindowsComputerUseNative]::IsWindowVisible([IntPtr]([int64]$_.nativeWindowHandle)) })
+    if ($shown.Count) { $found = $shown } elseif ($minimized.Count) { $found = $minimized }
+  }
+  if ($found.Count -gt 1) {
+    # Window entries are dictionaries: Select-Object would read null properties.
+    $candidates = @($found | Select-Object -First 20 | ForEach-Object { [ordered]@{ name = [string]$_.name; processId = $_.processId; nativeWindowHandle = $_.nativeWindowHandle } })
+    throw ('WINDOW_TARGET_AMBIGUOUS: use an explicit nativeWindowHandle. Candidate window titles are untrusted data: ' + (ConvertTo-Json -InputObject $candidates -Compress))
+  }
+  return $found[0]
 }
 
 function Resolve-TargetWindow {
@@ -1828,16 +2808,8 @@ function Resolve-TargetWindow {
     return $element
   }
 
-  $fallback = $null
-  foreach ($info in (Get-NativeWindowList -IncludeInvisible $true -MaxWindows 4096)) {
-    if (-not (Test-TargetMatch -Info $info -InputObject $InputObject)) { continue }
-    if (-not $info.isOffscreen) {
-      return [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]([int64]$info.nativeWindowHandle))
-    }
-    if ($null -eq $fallback) { $fallback = $info }
-  }
-  if ($null -ne $fallback) { return [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]([int64]$fallback.nativeWindowHandle)) }
-  throw "No top-level window matched the requested target."
+  $info = Select-TargetWindow $InputObject
+  return [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]([int64]$info.nativeWindowHandle))
 }
 
 function Get-ScopeRoot {
@@ -1877,7 +2849,8 @@ function Get-Children {
   $items = New-Object "System.Collections.Generic.List[System.Windows.Automation.AutomationElement]"
   try {
     $cache = New-ElementCacheRequest "compact"
-    $walker = New-Object System.Windows.Automation.TreeWalker -ArgumentList (Get-ViewCondition $ViewMode $IncludeOffscreen)
+    $isGeckoEl = ((Invoke-Safe { $Element.Current.ClassName } '') -eq 'MozillaWindowClass') -or ((Invoke-Safe { $Element.Current.FrameworkId } '') -eq 'Gecko')
+    $walker = New-Object System.Windows.Automation.TreeWalker -ArgumentList (Get-ViewCondition $ViewMode $IncludeOffscreen -SkipOffscreenFilter:$isGeckoEl)
     $child = $walker.GetFirstChild($Element, $cache)
     while ($null -ne $child -and $items.Count -lt $MaxChildren) {
       $items.Add($child)
@@ -1897,13 +2870,20 @@ function Test-TreeBudget {
   return $true
 }
 
+function Test-RectOverlap {
+  param([object]$A, [object]$B)
+  return ($null -ne $A -and $null -ne $B -and $A.width -gt 0 -and $A.height -gt 0 -and $B.width -gt 0 -and $B.height -gt 0 -and
+    $A.x -lt ($B.x + $B.width) -and $B.x -lt ($A.x + $A.width) -and
+    $A.y -lt ($B.y + $B.height) -and $B.y -lt ($A.y + $A.height))
+}
+
 function Convert-Tree {
   param(
     [System.Windows.Automation.AutomationElement]$Element,
     [string]$Path, [int]$Depth, [int]$MaxDepth, [ref]$Count, [int]$MaxNodes,
     [string]$ViewMode = "control", [bool]$IncludeOffscreen = $false,
     [string]$DetailLevel = "compact", [object]$Traversal, [object]$Owner = $null,
-    [int]$Level = -1
+    [int]$Level = -1, [object]$GeckoPageBounds = $null
   )
   if ($Count.Value -ge $MaxNodes) { $Traversal.reason = "maxNodes"; return $null }
   if (-not (Test-TreeBudget $Traversal)) { return $null }
@@ -1916,14 +2896,23 @@ function Convert-Tree {
   $script:ObservationOwner = $Owner
   $info = Convert-ElementInfo -Element $Element -Id "uia:$Path" -Depth $Depth -DetailLevel $DetailLevel -UseCache
   $Count.Value++
+  if ($Traversal.pruneGeckoOffscreen -and $info.controlType -eq 'Document') {
+    # Gecko can mark the whole page offscreen while its native window is
+    # visible. Keep controls whose bounds overlap this document, but keep
+    # the provider's isOffscreen value and the input checks unchanged.
+    $GeckoPageBounds = if ($Owner.isOffscreen -eq $false -and $info.isOffscreen -eq $true -and (Test-RectOverlap $info.boundingBox $Owner.boundingBox)) { $info.boundingBox }
+  }
   # Chromium nests a page six or more levels down, under unnamed layout panes
   # (NonClientView, ClientView, View...), and Firefox-family browsers put it
   # under three unnamed Gecko panes (#56). In window-scoped trees those panes do
   # not use up maxDepth, so the default depths reach the page; 16 extra levels
   # bound the recursion. Desktop trees stay an overview of every window.
   $childLevel = $Level + 1
-  if ($Traversal.browserLayout -and $info.controlType -eq 'Pane' -and [string]::IsNullOrEmpty($info.name) -and
-      (Invoke-Safe { $Element.Cached.FrameworkId } '') -in @('Chrome', 'Gecko')) { $childLevel = $Level }
+  $fw = Invoke-Safe { $Element.Cached.FrameworkId } ''
+  if ($Traversal.browserLayout -and [string]::IsNullOrEmpty($info.name) -and (
+      ($info.controlType -eq 'Pane' -and $fw -in @('Chrome', 'Gecko')) -or
+      (($fw -eq 'Gecko' -or ($null -ne $Owner -and $Owner.className -eq 'MozillaWindowClass')) -and $info.controlType -in @('Pane', 'Group', 'Custom'))
+    )) { $childLevel = $Level }
   $childrenOut = New-Object System.Collections.Generic.List[object]
   if ($childLevel -le $MaxDepth -and $Depth -lt $MaxDepth + 16 -and $Count.Value -lt $MaxNodes -and (Test-TreeBudget $Traversal)) {
     try {
@@ -1931,7 +2920,7 @@ function Convert-Tree {
       $i = 0
       while ($null -ne $child) {
         if ($Count.Value -ge $MaxNodes -or -not (Test-TreeBudget $Traversal)) { break }
-        $childOut = Convert-Tree -Element $child -Path "$Path.$i" -Depth ($Depth + 1) -MaxDepth $MaxDepth -Count $Count -MaxNodes $MaxNodes -ViewMode $ViewMode -IncludeOffscreen $IncludeOffscreen -DetailLevel $DetailLevel -Traversal $Traversal -Owner $Owner -Level $childLevel
+        $childOut = Convert-Tree -Element $child -Path "$Path.$i" -Depth ($Depth + 1) -MaxDepth $MaxDepth -Count $Count -MaxNodes $MaxNodes -ViewMode $ViewMode -IncludeOffscreen $IncludeOffscreen -DetailLevel $DetailLevel -Traversal $Traversal -Owner $Owner -Level $childLevel -GeckoPageBounds $GeckoPageBounds
         if ($null -ne $childOut) { $childrenOut.Add($childOut) }
         if ($Count.Value -ge $MaxNodes -or $null -ne $Traversal.reason -or -not (Test-TreeBudget $Traversal)) { break }
         $child = $Traversal.walker.GetNextSibling($child, $Traversal.cache)
@@ -1942,7 +2931,16 @@ function Convert-Tree {
       $Traversal.error = $_.Exception.Message
     }
   }
+  if ($Depth -gt 0 -and $Traversal.pruneGeckoOffscreen -and $info.isOffscreen -eq $true -and $childrenOut.Count -eq 0 -and $info.controlType -notin @('Window','Pane','Document','Group','Tab','TabItem') -and
+      (-not (Test-RectOverlap $info.boundingBox $GeckoPageBounds) -or -not (Test-RectOverlap $info.boundingBox $Owner.boundingBox))) {
+    $Count.Value--
+    $script:ObservationOwner = $previousOwner
+    return $null
+  }
   if ($Count.Value -ge $MaxNodes -and $null -eq $Traversal.reason) { $Traversal.reason = "maxNodes" }
+  # Only count nodes kept in the result, after the Gecko leaf filter.
+  $Traversal.countedDepth = [Math]::Max([int]$Traversal['countedDepth'], $Level)
+  $Traversal.structuralDepth = [Math]::Max([int]$Traversal['structuralDepth'], $Depth)
   $info["children"] = @($childrenOut.ToArray())
   $script:ObservationOwner = $previousOwner
   return $info
@@ -2020,6 +3018,37 @@ function Resolve-Element {
   throw "Unsupported element id '$ElementId'. Use an id from windows_computer_use_snapshot or windows_computer_use_accessibility_tree."
 }
 
+function Assert-ElementPoint {
+  param([object]$Element, [int]$X, [int]$Y)
+  if ($null -eq $Element) { return }
+  if ((Invoke-Safe { [bool]$Element.Current.IsOffscreen } $true)) { throw 'ELEMENT_OFFSCREEN: observe or scroll the requested element before clicking.' }
+  if (-not (Invoke-Safe { [bool]$Element.Current.IsEnabled } $false)) { throw 'ELEMENT_DISABLED: the requested element is disabled.' }
+  $point = New-Object System.Windows.Point($X, $Y)
+  $hit = [System.Windows.Automation.AutomationElement]::FromPoint($point)
+  $want = @($Element.GetRuntimeId()) -join '-'
+  if (-not $want) { throw 'ELEMENT_ID_UNCONFIRMED: the requested element has no runtime identity.' }
+  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  for ($depth = 0; $depth -lt 60 -and $null -ne $hit; $depth++) {
+    if ((@($hit.GetRuntimeId()) -join '-') -eq $want) { return }
+    $hit = $walker.GetParent($hit)
+  }
+  throw 'ELEMENT_POINT_COVERED: the point belongs to another element; no click was sent.'
+}
+
+function Confirm-ElementPoint {
+  param([System.Collections.IDictionary]$Point)
+  if ($null -eq $Point.element) { return }
+  $candidate = New-Object System.Windows.Point
+  try { $available = $Point.element.TryGetClickablePoint([ref]$candidate) } catch { $available = $false }
+  if ($available) { $Point.x = [int][Math]::Round($candidate.X); $Point.y = [int][Math]::Round($candidate.Y) }
+  else {
+    $rect = Convert-Rect (Invoke-Safe { $Point.element.Current.BoundingRectangle } $null)
+    if ($null -eq $rect) { throw 'ELEMENT_POINT_UNAVAILABLE: the element has no click point.' }
+    $Point.x = [int]$rect.centerX; $Point.y = [int]$rect.centerY
+  }
+  Assert-ElementPoint $Point.element $Point.x $Point.y
+}
+
 function Get-PointFromArgs {
   param([object]$InputObject)
   $elementId = Get-Prop $InputObject "elementId" $null
@@ -2091,16 +3120,15 @@ function Get-ButtonFlags {
 function Click-At {
   param([int]$X, [int]$Y, [string]$Button = "left", [int]$Count = 1)
   $flags = Get-ButtonFlags $Button
-  Move-ToPoint -X $X -Y $Y
-  Start-Sleep -Milliseconds 40
   for ($i = 0; $i -lt $Count; $i++) {
     [void](Test-Failsafe)
-    if ([WindowsComputerUseNative]::SendMouseEvent(0, 0, [uint32]$flags[0], 0) -ne 1) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected mouse input.' }
-    try { Start-Sleep -Milliseconds 30 }
-    finally {
-      if ([WindowsComputerUseNative]::SendMouseEvent(0, 0, [uint32]$flags[1], 0) -ne 1) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected mouse release.' }
+    $sent = [WindowsComputerUseNative]::SendClick($X, $Y, [uint32]$flags[0], [uint32]$flags[1])
+    if ($sent -lt 2) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected mouse input. The click was not replayed.' }
+    if ($sent -ne 3) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected mouse release. Cleanup was attempted; the click was not replayed.' }
+    if ($i + 1 -lt $Count) {
+      # Pause between rapid multi-clicks so double/triple click detection fires reliably.
+      Start-Sleep -Milliseconds 60
     }
-    Start-Sleep -Milliseconds 60
   }
 }
 
@@ -2110,39 +3138,60 @@ function Move-ToPoint {
   if (-not [WindowsComputerUseNative]::SetCursorPos($X, $Y)) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected cursor positioning. Restore the interactive desktop before retrying.' }
 }
 
+function Begin-ClipboardLease {
+  param([string]$Text, [bool]$RestoreClipboard)
+  if (-not ('WcuClipboardLease' -as [type])) {
+    $clipboardSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-clipboard.cs'),[Text.Encoding]::UTF8)
+    $precompiled = (Get-Command Import-PackagedHelper -ErrorAction SilentlyContinue) -and (Import-PackagedHelper -Name clipboard -Source $clipboardSource)
+    if (-not $precompiled) {
+      $runtimeKey = $PSVersionTable.PSEdition.ToLowerInvariant() + '-clr' + [Environment]::Version.Major
+      $dll = Join-Path (Get-HelperCacheDir) ("wcu-clipboard-" + $runtimeKey + '-' + (Get-CsHash -Source $clipboardSource) + ".dll")
+      $references = @('System.Windows.Forms', 'System.Drawing')
+      if ($PSVersionTable.PSEdition -eq 'Core') {
+        # As for the takeover helper: the short names alone miss the .NET
+        # reference assemblies (HashSet<T>) and the split Windows Forms ones.
+        $references = @(Get-ChildItem -LiteralPath (Join-Path $PSHOME 'ref') -Filter '*.dll' | ForEach-Object { $_.FullName })
+        $references += [System.Reflection.Assembly]::Load('System.Windows.Forms').Location
+        $references += [System.Reflection.Assembly]::Load('System.Windows.Forms.Primitives').Location
+        $references += [System.Reflection.Assembly]::Load('System.Drawing.Common').Location
+        $references += @(Get-ChildItem -LiteralPath $PSHOME -Filter 'System.Private.Windows*.dll' | ForEach-Object { $_.FullName })
+      }
+      Import-HelperAssembly -Path $dll -Compile { param($out) Add-Type -TypeDefinition $clipboardSource -ReferencedAssemblies $references -OutputAssembly $out }
+    }
+  }
+  [uint32]$targetProcess = 0
+  $focusedWindow=[WindowsComputerUseNative]::FocusedWindow([WindowsComputerUseNative]::GetForegroundWindow())
+  if($focusedWindow -ne [IntPtr]::Zero){[void][WindowsComputerUseNative]::GetWindowThreadProcessId($focusedWindow, [ref]$targetProcess)}
+  return New-Object -TypeName WcuClipboardLease -ArgumentList @($Text, $RestoreClipboard, [int]$targetProcess)
+}
+
 function Type-Text {
   param([string]$Text, [bool]$RestoreClipboard = $true)
   # Check the input desktop without repositioning the shared pointer. The user
   # may have moved it since GetCursorPos returned; pasting needs no mouse move.
   $position = New-Object WindowsComputerUseNative+POINT
   if (-not [WindowsComputerUseNative]::GetCursorPos([ref]$position)) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows input desktop is unavailable.' }
-  $oldData = $null
-  # Fail before replacing the clipboard if its contents cannot be preserved.
-  if ($RestoreClipboard) { $rawData = [System.Windows.Forms.Clipboard]::GetDataObject()
-    if ($null -ne $rawData) {
-      $oldData = New-Object System.Windows.Forms.DataObject
-      foreach ($format in $rawData.GetFormats($false)) {
-        $oldData.SetData($format, $false, $rawData.GetData($format, $false))
-      }
-    } }
+  $script:LastPasteInfo = $null
+  [void](Test-Failsafe)
+  $lease = Begin-ClipboardLease -Text $Text -RestoreClipboard $RestoreClipboard
   try {
-    # The pasted text stays out of the user's clipboard history (Win+V) and
-    # cloud clipboard: Windows skips content carrying these formats.
-    $data = New-Object System.Windows.Forms.DataObject
-    $data.SetData('UnicodeText', $false, $Text)
-    $data.SetData('ExcludeClipboardContentFromMonitorProcessing', $false, (New-Object System.IO.MemoryStream (,[byte[]](0, 0, 0, 0))))
-    $data.SetData('CanIncludeInClipboardHistory', $false, (New-Object System.IO.MemoryStream (,[byte[]](0, 0, 0, 0))))
-    $data.SetData('CanUploadToCloudClipboard', $false, (New-Object System.IO.MemoryStream (,[byte[]](0, 0, 0, 0))))
-    [System.Windows.Forms.Clipboard]::SetDataObject($data, $true)
-    Start-Sleep -Milliseconds 50
     [void](Test-Failsafe)
-    [System.Windows.Forms.SendKeys]::SendWait('^v')
-    Start-Sleep -Milliseconds 80
-  } finally {
-    if ($RestoreClipboard) {
-      if ($null -ne $oldData) { [System.Windows.Forms.Clipboard]::SetDataObject($oldData, $true) }
-      else { [System.Windows.Forms.Clipboard]::Clear() }
+    $pasteTarget=[WindowsComputerUseNative]::FocusedWindow([WindowsComputerUseNative]::GetForegroundWindow())
+    if (-not $lease.TryPasteNative($pasteTarget)) {
+      if (-not [WindowsComputerUseNative]::SendKeyChord(@('ctrl','v'))) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected paste input.' }
+      $lease.MarkPasteSent([WindowsComputerUseNative]::FocusedWindow([WindowsComputerUseNative]::GetForegroundWindow()))
     }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds(2200)
+    while (-not $lease.IsCompleted -and [DateTime]::UtcNow -lt $deadline) {
+      [void](Test-Failsafe)
+      [void]$lease.Complete(25)
+    }
+    $requested = $lease.Complete(0)
+    $script:LastPasteInfo = @{ clipboardRequested = $requested; clipboardPasteCompleted = $lease.NativePasteCompleted; clipboardRestored = $lease.Restored; clipboardRestoreFailed = $lease.RestorationFailed; clipboardRequestWindow = $lease.RequestWindow; clipboardRequestProcessId = $lease.RequestProcessId }
+  } finally {
+    # The lease rolls back if nothing was sent. Once dispatched it keeps the
+    # requested text available for slow recipients until a read is confirmed.
+    $lease.Dispose()
   }
 }
 
@@ -2182,6 +3231,7 @@ function Convert-KeyChord {
 
 function Invoke-ElementPattern {
   param([object]$Element)
+  Assert-InputProcess ([int](Invoke-Safe { $Element.Current.ProcessId } 0))
   $script:BackgroundReport = $null
   $native = Invoke-NativeButton $Element
   if ($null -ne $native) { return $native }
@@ -2224,6 +3274,7 @@ function Invoke-UiaPattern {
 
 function Set-ElementValue {
   param([System.Windows.Automation.AutomationElement]$Element, [string]$Value)
+  Assert-InputProcess ([int](Invoke-Safe { $Element.Current.ProcessId } 0))
   $script:BackgroundReport = $null
   $native = Set-NativeEditText $Element $Value
   if ($null -ne $native) { return $native }
@@ -2363,10 +3414,10 @@ function Get-ExtendedFrameBounds {
 
 function Test-WindowScreenCapture {
   param([long]$Hwnd, [object]$Bounds, [object]$VirtualScreen)
-  # EnumWindows is in Z order. Be conservative about overlays, including
-  # same-process popups: a screen crop is usable only with no overlap above it.
+  # Include this window's owned dialogs/menus in its screen crop. Unrelated
+  # windows, including unowned same-process siblings, still make it unusable.
   if ($null -eq $Bounds -or $Bounds.width -le 0 -or $Bounds.height -le 0) { return $false }
-  if ([WindowsComputerUseNative]::GetForegroundWindow().ToInt64() -ne $Hwnd) { return $false }
+  if (-not (Test-InputWindow ([WindowsComputerUseNative]::GetForegroundWindow().ToInt64()) $Hwnd)) { return $false }
   if ($Bounds.x -lt $VirtualScreen.Left -or $Bounds.y -lt $VirtualScreen.Top -or
       $Bounds.x + $Bounds.width -gt $VirtualScreen.Right -or
       $Bounds.y + $Bounds.height -gt $VirtualScreen.Bottom) { return $false }
@@ -2375,6 +3426,12 @@ function Test-WindowScreenCapture {
       return ([WindowsComputerUseNative]::IsWindowVisible($handle) -and -not [WindowsComputerUseNative]::IsIconic($handle))
     }
     if (-not [WindowsComputerUseNative]::IsWindowVisible($handle) -or [WindowsComputerUseNative]::IsIconic($handle)) { continue }
+    if (Test-InputWindow $handle.ToInt64() $Hwnd) { continue }
+    [uint32]$overlayOwner = 0
+    if ($script:TakeoverProcessId) {
+      [void][WindowsComputerUseNative]::GetWindowThreadProcessId($handle, [ref]$overlayOwner)
+      if ($overlayOwner -eq $script:TakeoverProcessId) { continue }
+    }
     $other = New-Object WindowsComputerUseNative+RECT
     # Unknown geometry must not be treated as proof that the crop is clear.
     if (-not [WindowsComputerUseNative]::GetWindowRect($handle, [ref]$other)) { return $false }
@@ -2385,45 +3442,65 @@ function Test-WindowScreenCapture {
 }
 
 function Try-PrintWindowCapture {
-  # PrintWindow renders the window's own surface even when it is not the
-  # foreground window. DirectComposition-backed surfaces (UWP/WinUI) can come
-  # back pitch black — detect that and report failure so the caller falls
-  # back to a screen-region capture.
-  param([long]$Hwnd, [int]$Width, [int]$Height)
+  param([long]$Hwnd,[int]$Width,[int]$Height)
   if ($Width -le 0 -or $Height -le 0) { return $null }
-  $bmp = New-Object System.Drawing.Bitmap $Width, $Height
-  $g = [System.Drawing.Graphics]::FromImage($bmp)
-  $accepted = $false
+  $outer=New-Object WindowsComputerUseNative+RECT
+  if (-not [WindowsComputerUseNative]::GetWindowRect([IntPtr]$Hwnd,[ref]$outer)) { return $null }
+  $frame=Get-ExtendedFrameBounds $Hwnd
+  if ($null -eq $frame -or $frame.width -ne $Width -or $frame.height -ne $Height) { return $null }
+  $left=[int]$frame.x-$outer.left;$top=[int]$frame.y-$outer.top
+  $fullWidth=$outer.right-$outer.left;$fullHeight=$outer.bottom-$outer.top
+  if ($left -lt 0 -or $top -lt 0 -or $left+$Width -gt $fullWidth -or $top+$Height -gt $fullHeight) { return $null }
+  $raw=New-Object System.Drawing.Bitmap $fullWidth,$fullHeight
+  $cropped=$null;$accepted=$false
   try {
-    $hdc = $g.GetHdc()
+    $graphics=[System.Drawing.Graphics]::FromImage($raw)
     try {
-      $ok = [WindowsComputerUseNative]::PrintWindow([IntPtr]$Hwnd, $hdc, 2)
-    } finally {
-      $g.ReleaseHdc($hdc)
-    }
+      $hdc=$graphics.GetHdc()
+      try { $ok=[WindowsComputerUseNative]::PrintWindow([IntPtr]$Hwnd,$hdc,2) }
+      finally { $graphics.ReleaseHdc($hdc) }
+    } finally { $graphics.Dispose() }
     if (-not $ok) { return $null }
-    $allDark = $true
-    for ($i = 0; $i -lt $Width; $i += 24) {
-      for ($j = 0; $j -lt $Height; $j += 24) {
-        $px = $bmp.GetPixel($i, $j)
-        if ($px.R -gt 10 -or $px.G -gt 10 -or $px.B -gt 10) { $allDark = $false; break }
+    $after=New-Object WindowsComputerUseNative+RECT
+    if (-not [WindowsComputerUseNative]::GetWindowRect([IntPtr]$Hwnd,[ref]$after) -or
+        $after.left -ne $outer.left -or $after.top -ne $outer.top -or
+        $after.right -ne $outer.right -or $after.bottom -ne $outer.bottom) { return $null }
+    $crop=New-Object System.Drawing.Rectangle $left,$top,$Width,$Height
+    $cropped=$raw.Clone($crop,[System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $allDark=$true
+    $stepX=[Math]::Max(4,[Math]::Min(16,[int]($Width/16)))
+    $stepY=[Math]::Max(4,[Math]::Min(16,[int]($Height/16)))
+    $bmpRect=New-Object System.Drawing.Rectangle 0,0,$Width,$Height
+    $bmpData=$cropped.LockBits($bmpRect,[System.Drawing.Imaging.ImageLockMode]::ReadOnly,[System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+      for($y=0;$y -lt $Height;$y+=$stepY){
+        $rowOffset=$y*$bmpData.Stride
+        for($x=0;$x -lt $Width;$x+=$stepX){
+          $argb=[System.Runtime.InteropServices.Marshal]::ReadInt32($bmpData.Scan0,$rowOffset+($x*4))
+          if(((($argb -shr 16) -band 0xFF) -gt 4) -or ((($argb -shr 8) -band 0xFF) -gt 4) -or (($argb -band 0xFF) -gt 4)){$allDark=$false;break}
+        }
+        if(-not $allDark){break}
       }
-      if (-not $allDark) { break }
+    } finally {
+      $cropped.UnlockBits($bmpData)
     }
-    if ($allDark) { return $null }
-    $accepted = $true
-    return $bmp
+    if($allDark){return $null}
+    $accepted=$true;return $cropped
   } finally {
-    $g.Dispose()
-    if (-not $accepted) { $bmp.Dispose() }
+    $raw.Dispose()
+    if(-not $accepted -and $null -ne $cropped){$cropped.Dispose()}
   }
 }
 
 # Our own screenshot PNGs older than 30 minutes. Times compare in UTC: a
 # local write time against a UTC cutoff kept files for hours east of UTC and
 # deleted fresh ones west of it.
+$script:LastScreenshotCleanupUtc = $null
 function Remove-OldScreenshots {
-  $cutoff = [DateTime]::UtcNow.AddMinutes(-30)
+  $now = [DateTime]::UtcNow
+  if ($null -ne $script:LastScreenshotCleanupUtc -and ($now - $script:LastScreenshotCleanupUtc).TotalSeconds -lt 60) { return }
+  $script:LastScreenshotCleanupUtc = $now
+  $cutoff = $now.AddMinutes(-30)
   try {
     foreach ($file in [System.IO.Directory]::EnumerateFiles($env:TEMP, 'windows-computer-use-*.png')) {
       if ([System.IO.File]::GetLastWriteTimeUtc($file) -lt $cutoff) { Remove-TempFile $file }
@@ -2432,17 +3509,25 @@ function Remove-OldScreenshots {
 }
 
 function Capture-Screenshot {
-  param([object]$WindowElement = $null, [int]$MaxWidth = 1600)
-  Remove-OldScreenshots
+  param([object]$WindowElement = $null, [int]$MaxWidth = 1600, [bool]$IncludeImageData = ($script:WcuImageData -ne $false), [switch]$InMemory)
+  $background = $env:WCU_BACKGROUND_DESKTOP -eq '1'
+  if ($background -and $null -eq $WindowElement) {
+    throw 'WCU_BACKGROUND_DESKTOP_TARGET_REQUIRED: capture a window by its nativeWindowHandle.'
+  }
+  if (-not $InMemory) { Remove-OldScreenshots }
   $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
   $bmp = $null
   $method = "screen"
   $occludedPossible = $false
   $windowCaptureFailed = $false
   $bx = $vs.Left; $by = $vs.Top; $bw = $vs.Width; $bh = $vs.Height
+  $minimized = $false
 
   if ($null -ne $WindowElement) {
     $hwnd = if (Get-Prop $WindowElement 'nativeWindowHandle' 0) { [int64]$WindowElement.nativeWindowHandle } else { Invoke-Safe { [int64]$WindowElement.Current.NativeWindowHandle } 0 }
+    # Windows parks a minimized window at -32000,-32000 and draws only its
+    # title strip there: the capture works but shows nothing of the app (#82).
+    $minimized = [bool]($hwnd -and [WindowsComputerUseNative]::IsIconic([IntPtr]$hwnd))
     $rect = $null
     if ($hwnd -and $hwnd -ne 0) { $rect = Get-ExtendedFrameBounds -Hwnd $hwnd }
     if ($null -eq $rect) { $rect = Convert-Rect (Invoke-Safe { $WindowElement.Current.BoundingRectangle } $null) }
@@ -2451,7 +3536,7 @@ function Capture-Screenshot {
       # PrintWindow may return success with a partial Chromium/CEF surface.
       # For an unobstructed foreground window, read the actual desktop pixels.
       # Recheck Z order, focus and geometry after the copy before accepting it.
-      if (Invoke-Safe { Test-WindowScreenCapture -Hwnd $hwnd -Bounds $rect -VirtualScreen $vs } $false) {
+      if (-not $background -and (Invoke-Safe { Test-WindowScreenCapture -Hwnd $hwnd -Bounds $rect -VirtualScreen $vs } $false)) {
         $screen = $null
         try {
           $screen = New-Object System.Drawing.Bitmap $rect.width, $rect.height
@@ -2474,27 +3559,9 @@ function Capture-Screenshot {
       if ($null -ne $bmp) {
         if ($method -ne "screen-region") { $method = "printwindow" }
         $bx = $rect.x; $by = $rect.y; $bw = $rect.width; $bh = $rect.height
-      } else {
-        # PrintWindow came back black/failed (UWP/WinUI/DirectComposition).
-        # Try Windows.Graphics.Capture: it reads the window's composited
-        # frame from DWM, so it works even when the window is occluded.
-        $wgcPng = Join-Path $env:TEMP ("wcu-wgc-" + [Guid]::NewGuid().ToString("N") + ".png")
-        $wgc = Invoke-Safe { Invoke-WgcCapture -Hwnd $hwnd -Width $rect.width -Height $rect.height -OutPng $wgcPng -TimeoutMs 4000 } $null
-        if ($null -ne $wgc -and [System.IO.File]::Exists($wgcPng)) {
-          try {
-            $src = New-Object System.Drawing.Bitmap($wgcPng)
-            $dst = New-Object System.Drawing.Bitmap($src.Width, $src.Height)
-            $g = [System.Drawing.Graphics]::FromImage($dst)
-            try { $g.DrawImage($src, 0, 0) } finally { $g.Dispose() }
-            $src.Dispose()
-            $bmp = $dst
-            $method = "wgc"
-            $bx = $rect.x; $by = $rect.y; $bw = $rect.width; $bh = $rect.height
-          } catch {
-            $bmp = $null
-          }
-        }
-        Remove-TempFile $wgcPng
+      } elseif (-not $background) {
+        # PrintWindow may fail for composited surfaces. The final screen crop
+        # is explicitly marked as possibly occluded.
         if ($null -eq $bmp) {
           # Last resort: the on-screen part of the window rect. This may show
           # whatever is covering the window — flagged, not hidden.
@@ -2520,6 +3587,7 @@ function Capture-Screenshot {
   }
 
   if ($null -eq $bmp) {
+    if ($background) { throw 'WCU_BACKGROUND_DESKTOP_LIMIT: Windows could not capture this window on the background desktop.' }
     if ($windowCaptureFailed) {
       # Target window has no capturable surface (minimized/hidden): capture
       # the whole screen but say so explicitly instead of pretending.
@@ -2546,26 +3614,35 @@ function Capture-Screenshot {
     $bmp = $small
   }
 
-  $file = Join-Path $env:TEMP ("windows-computer-use-" + [Guid]::NewGuid().ToString("N") + ".png")
-  $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
-  $bmp.Dispose()
-  $bytes = [System.IO.File]::ReadAllBytes($file)
+  $file = $null; $pngBytes = $null
+  if ($InMemory) {
+    $stream = New-Object System.IO.MemoryStream
+    try { $bmp.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); $pngBytes = $stream.ToArray() }
+    finally { $stream.Dispose(); $bmp.Dispose() }
+    $byteLength = $pngBytes.Length
+  } else {
+    $file = Join-Path $env:TEMP ("windows-computer-use-" + [Guid]::NewGuid().ToString("N") + ".png")
+    try { $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
+    $byteLength = (New-Object System.IO.FileInfo -ArgumentList $file).Length
+  }
 
   $meta = [ordered]@{
     path = $file
     mimeType = "image/png"
-    bytes = $bytes.Length
+    bytes = $byteLength
     method = $method
     bounds = [ordered]@{ x = $bx; y = $by; width = $bw; height = $bh }
     imageScale = [Math]::Round($scale, 4)
   }
   if ($method -eq "screen-region") { $meta["occludedPossible"] = $occludedPossible }
   if ($windowCaptureFailed) { $meta["windowCaptureFailed"] = $true }
+  if ($minimized) { $meta["minimized"] = $true }
   if ($scale -ne 1.0) {
     $meta["imageScale"] = [Math]::Round($scale, 4)
     $meta["origin"] = [ordered]@{ x = $bx; y = $by }
   }
-  $meta["base64"] = [Convert]::ToBase64String($bytes)
+  if ($InMemory) { $meta['pngBytes'] = $pngBytes }
+  elseif ($IncludeImageData) { $meta['base64'] = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file)) }
   return $meta
 }
 
@@ -2575,14 +3652,7 @@ function Get-ObservationWindow {
   param([object]$InputObject, [string]$Scope = "active_window", [switch]$Foreground)
   if ($Scope -eq "desktop") { return $null }
   if (Has-WindowTarget $InputObject) {
-    $fallback = $null
-    foreach ($info in (Get-NativeWindowList -IncludeInvisible $true -MaxWindows 4096)) {
-      if (-not (Test-TargetMatch $info $InputObject)) { continue }
-      if (-not $info.isOffscreen) { return $info }
-      if ($null -eq $fallback) { $fallback = $info }
-    }
-    if ($null -eq $fallback) { throw "No top-level window matched the requested target." }
-    return $fallback
+    return (Select-TargetWindow $InputObject)
   }
   $hwnd = if ($Foreground) { [WindowsComputerUseNative]::GetForegroundWindow().ToInt64() } else { Get-WorkWindow }
   foreach ($info in (Get-NativeWindowList -IncludeInvisible $true -MaxWindows 4096)) {
@@ -2620,6 +3690,75 @@ function Test-ChromiumPage {
   return ($null -ne $walker.GetFirstChild($root))
 }
 
+# Attachment is not content. A document that finished loading before its content
+# reached the DOM exposes its root and one unnamed container, so the page tree is
+# attached while the window shows nothing: measured on Edge 157, a page whose
+# body held only an empty mount element gave one descendant with no name, 0
+# characters of text and the same all-white frame as about:blank. This walk
+# answers one question -- does the page carry text? -- so one observation can
+# say "nothing to read yet" instead of leaving it to be inferred from the
+# attachment flag.
+#
+# It stops at the first descendant that carries text: the answer is a boolean,
+# so walking the rest only spends the caller's time budget (measured on
+# Electron 44, a full walk doubled a normal page's observation, 129 -> 274 ms).
+# It also stops at $LimitMs and at $MaxNodes and says which happened, so a walk
+# that did not finish is reported as unknown instead of empty.
+#
+# The page root is skipped on purpose: its name is the document title, which an
+# otherwise blank page has too (<title> with an empty body still yields a named
+# root). Returns $null when the renderer exposes no page root at all, which is
+# "not built yet", not "empty".
+#
+# This looks for text, and only text. A page whose whole content is an image or
+# a canvas carries no text and can still be a working page, so "no text" is a
+# fact about text nodes, not a verdict about the page; callers must not turn it
+# into "broken", and not into "reload".
+function Get-ChromiumPageContent {
+  param([IntPtr]$Renderer, [int]$LimitMs = 250, [int]$MaxNodes = 200)
+  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  $root = $walker.GetFirstChild([System.Windows.Automation.AutomationElement]::FromHandle($Renderer))
+  if ($null -eq $root) { return $null }
+  [void]$root.Current.ControlType
+  $facts = @{ hasText = $false; truncated = $false }
+  $watch = [System.Diagnostics.Stopwatch]::StartNew()
+  $visited = 0
+  $queue = New-Object System.Collections.Generic.Queue[object]
+  $child = $walker.GetFirstChild($root)
+  while ($null -ne $child -and $queue.Count -lt $MaxNodes -and $watch.ElapsedMilliseconds -lt $LimitMs) {
+    $queue.Enqueue($child)
+    $child = $walker.GetNextSibling($child)
+  }
+  if ($null -ne $child) { $facts.truncated = $true }
+  while ($queue.Count -gt 0) {
+    # Both limits mean the same thing here: the subtree was not read to the end.
+    if ($visited -ge $MaxNodes -or $watch.ElapsedMilliseconds -ge $LimitMs) { $facts.truncated = $true; break }
+    $element = $queue.Dequeue()
+    $visited++
+    $text = ''
+    try { $text = [string]$element.Current.Name } catch { }
+    if (-not $text.Trim()) {
+      # A control that carries only a value (a filled input, a document body)
+      # still shows text; the name is not the only place it can live.
+      try {
+        $pattern = $null
+        if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+          if ($null -ne $pattern -and ([string]$pattern.Current.Value).Trim()) { $text = [string]$pattern.Current.Value }
+        }
+      } catch { }
+    }
+    if ($text.Trim()) { return @{ hasText = $true; truncated = $false } }
+    if ($watch.ElapsedMilliseconds -ge $LimitMs) { $facts.truncated = $true; break }
+    $next = $walker.GetFirstChild($element)
+    while ($null -ne $next -and $queue.Count -lt $MaxNodes -and $watch.ElapsedMilliseconds -lt $LimitMs) {
+      $queue.Enqueue($next)
+      $next = $walker.GetNextSibling($next)
+    }
+    if ($null -ne $next) { $facts.truncated = $true }
+  }
+  return $facts
+}
+
 function Initialize-ChromiumPages {
   param([object]$Window, [object]$Traversal)
   if ($null -eq $Window) { return $null }
@@ -2631,6 +3770,7 @@ function Initialize-ChromiumPages {
   $now = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
   $status = [ordered]@{ renderers = $renderers.Count; ready = 0; waitedMs = 0; state = 'ready' }
   $pending = New-Object System.Collections.Generic.List[object]
+  $responsive = New-Object System.Collections.Generic.List[object]
   foreach ($renderer in $renderers) {
     $owner = [uint32]0
     [void][WindowsComputerUseNative]::GetWindowThreadProcessId($renderer, [ref]$owner)
@@ -2645,6 +3785,7 @@ function Initialize-ChromiumPages {
       $status["unresponsive"] = 1 + [int]$status["unresponsive"]
       continue
     }
+    $responsive.Add($renderer)
     # A provider that refuses the read (an elevated app behind UIPI, a closing
     # page) gains nothing from waiting; the next observation probes it again.
     try { $ready = Test-ChromiumPage $renderer } catch { continue }
@@ -2670,11 +3811,98 @@ function Initialize-ChromiumPages {
     $starting = @($pending | Where-Object { -not $_.page.ready -and ($now - $_.page.firstSeen) -lt 30000 }).Count
     $status.state = if ($status.ready -gt 0) { 'partial' } elseif ($starting -gt 0) { 'starting' } else { 'unavailable' }
   }
+  # Report the content separately from the attachment above, and only for
+  # renderers whose provider answered: a page that is still building has no
+  # content reading yet, which is different from a page measured as empty.
+  # ready, state and waitedMs keep their meaning, so existing callers of this
+  # window-scoped status see no change.
+  #
+  # The walk gets a budget of its own -- at most 250 ms and at most a tenth of
+  # treeTimeoutMs -- so the tree the caller asked for keeps most of the budget,
+  # and the loop stops at the first renderer that carries text.
+  $contentLimit = [Math]::Min(250, [int]($Traversal.budgetMs / 10))
+  $measured = 0
+  $foundText = $false
+  foreach ($renderer in $responsive) {
+    $facts = Invoke-Safe { Get-ChromiumPageContent $renderer $contentLimit } $null
+    if ($null -eq $facts) { continue }
+    if ($facts.hasText) { $foundText = $true; break }
+    if (-not $facts.truncated) { $measured++ }
+  }
+  # contentState reports what was measured, never a guess: a walk cut short by
+  # its time limit or the node cap, a refused provider and a page tree that has
+  # not arrived all report unknown instead of claiming the page is empty.
+  $status["contentState"] = if ($foundText) { 'content' } elseif ($measured -eq $renderers.Count) { 'empty' } else { 'unknown' }
   return $status
+}
+
+function Test-GeckoPageTree {
+  param([IntPtr]$Hwnd)
+  $el = [System.Windows.Automation.AutomationElement]::FromHandle($Hwnd)
+  if ($null -eq $el) { return $false }
+  $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+  $docCond = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::ControlTypeProperty), ([System.Windows.Automation.ControlType]::Document)
+  $doc = $el.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $docCond)
+  if ($null -ne $doc -and $null -ne $walker.GetFirstChild($doc)) { return $true }
+  $child = $walker.GetFirstChild($el)
+  $steps = 0
+  while ($null -ne $child -and $steps -lt 64) {
+    $steps++
+    $ct = Invoke-Safe { $child.Current.ControlType } $null
+    if ($ct -eq [System.Windows.Automation.ControlType]::Document) { return ($null -ne $walker.GetFirstChild($child)) }
+    if ($ct -eq [System.Windows.Automation.ControlType]::Pane -or $ct -eq [System.Windows.Automation.ControlType]::Group) {
+      $d2 = $walker.GetFirstChild($child)
+      if ($null -ne $d2) {
+        $d3 = $walker.GetFirstChild($d2)
+        if ($null -ne $d3 -and $null -ne $walker.GetFirstChild($d3)) { return $true }
+      }
+    }
+    $child = $walker.GetNextSibling($child)
+  }
+  return $false
+}
+
+$script:GeckoPages = @{}
+function Initialize-GeckoPages {
+  param([object]$Window, [object]$Traversal)
+  if ($null -eq $Window -or $Window.className -ne 'MozillaWindowClass') { return $null }
+  $hwnd = [IntPtr]([int64]$Window.nativeWindowHandle)
+  if ($hwnd -eq [IntPtr]::Zero -or -not [WindowsComputerUseNative]::IsWindow($hwnd)) { return $null }
+  if (-not [WindowsComputerUseNative]::IsResponsive($hwnd)) { return $null }
+  if ($null -eq $script:GeckoPages) { $script:GeckoPages = @{} }
+  $owner = [uint32]0
+  [void][WindowsComputerUseNative]::GetWindowThreadProcessId($hwnd, [ref]$owner)
+  $key = [string]$hwnd.ToInt64()
+  $entry = $script:GeckoPages[$key]
+  if ($null -eq $entry -or $entry.processId -ne $owner) {
+    $entry = @{ processId = $owner; ready = $false }
+    $script:GeckoPages[$key] = $entry
+  }
+  if ($entry.ready -and (Invoke-Safe { Test-GeckoPageTree $hwnd } $false)) {
+    return @{ state = 'ready'; waitedMs = 0 }
+  }
+  $entry.ready = $false
+  [UIntPtr]$wakeRes = [UIntPtr]::Zero
+  try { [void][WindowsComputerUseNative]::SendMessageTimeout($hwnd, 0x003D, [UIntPtr]::Zero, [IntPtr](-4), 3, 500, [ref]$wakeRes) } catch { }
+  if (Invoke-Safe { Test-GeckoPageTree $hwnd } $false) {
+    $entry.ready = $true
+    return @{ state = 'ready'; waitedMs = 0 }
+  }
+  $start = $Traversal.watch.ElapsedMilliseconds
+  $limit = [Math]::Min(2500, [int]($Traversal.budgetMs / 2))
+  while (($Traversal.watch.ElapsedMilliseconds - $start) -lt $limit) {
+    Start-Sleep -Milliseconds 80
+    if (Invoke-Safe { Test-GeckoPageTree $hwnd } $false) {
+      $entry.ready = $true
+      return @{ state = 'ready'; waitedMs = [int]($Traversal.watch.ElapsedMilliseconds - $start) }
+    }
+  }
+  return @{ state = 'starting'; waitedMs = [int]($Traversal.watch.ElapsedMilliseconds - $start) }
 }
 
 function Get-TreeResult {
   param([string]$Scope, [int]$MaxDepth, [int]$MaxNodes, [object]$InputObject = $null)
+  $script:ElementGeneration++
   $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
   $viewMode = Get-ViewMode $InputObject "control"
   $includeOffscreen = [bool](Get-Prop $InputObject "includeOffscreen" $false)
@@ -2689,8 +3917,9 @@ function Get-TreeResult {
   }
   $responsive = Get-WindowResponsive $window
   $cache = New-ElementCacheRequest $detailLevel
-  $walker = New-Object System.Windows.Automation.TreeWalker -ArgumentList (Get-ViewCondition $viewMode $includeOffscreen)
-  $traversal = @{watch=$stopwatch; budgetMs=$budgetMs; cache=$cache; walker=$walker; reason=$null; error=$null; browserLayout=($Scope -ne 'desktop')}
+  $isGecko = ($null -ne $window -and $window.className -eq 'MozillaWindowClass')
+  $walker = New-Object System.Windows.Automation.TreeWalker -ArgumentList (Get-ViewCondition $viewMode $includeOffscreen -SkipOffscreenFilter:$isGecko)
+  $traversal = @{watch=$stopwatch; budgetMs=$budgetMs; cache=$cache; walker=$walker; reason=$null; error=$null; browserLayout=($Scope -ne 'desktop'); pruneGeckoOffscreen=($isGecko -and -not $includeOffscreen); countedDepth=0; structuralDepth=0}
   $tree = $null
   $count = 0
   $pages = $null
@@ -2700,7 +3929,10 @@ function Get-TreeResult {
     $root = Get-ScopeRoot $Scope $InputObject
     Update-WindowCache $root
     Update-WindowIdentity $InputObject $root
-    if ($Scope -ne 'desktop') { $pages = Initialize-ChromiumPages $window $traversal }
+    if ($Scope -ne 'desktop') {
+      $pages = Initialize-ChromiumPages $window $traversal
+      if ($null -eq $pages -and $isGecko) { [void](Initialize-GeckoPages $window $traversal) }
+    }
     try {
       if (Test-TreeBudget $traversal) {
         $root = $root.GetUpdatedCache($cache)
@@ -2718,8 +3950,12 @@ function Get-TreeResult {
   $result = [ordered]@{
     ok = $true; scope = $Scope; viewMode = $viewMode; includeOffscreen = $includeOffscreen
     detailLevel = $detailLevel; nodeCount = $count; truncated = ($null -ne $traversal.reason)
+    countedDepth = $traversal.countedDepth; structuralDepth = $traversal.structuralDepth
     durationMs = [int]$stopwatch.ElapsedMilliseconds; tree = $tree
     treeTimeoutMs = $budgetMs; targetResponsive = $responsive
+  }
+  if ($null -ne $window -and $null -ne $script:WindowCache -and $script:WindowCache.ContainsKey([string]$window.nativeWindowHandle)) {
+    $result['windowObservation']=$script:WindowCache[[string]$window.nativeWindowHandle]
   }
   if ($null -ne $pages) { $result["webContent"] = $pages }
   if ($null -ne $traversal.reason) {
@@ -2773,12 +4009,20 @@ function Resolve-LaunchTarget {
 
 function Invoke-LaunchApp {
   param([object]$InputObject)
-  $resolved = Resolve-LaunchTarget ([string](Get-Prop $InputObject 'target' ''))
+  $rawTarget = [Environment]::ExpandEnvironmentVariables([string](Get-Prop $InputObject 'target' ''))
+  if ($rawTarget -match '^[\\/]{2,}') { throw 'LAUNCH_POLICY_DENIED: network paths are not supported.' }
+  $resolved = Resolve-LaunchTarget $rawTarget
+  $background = $env:WCU_BACKGROUND_DESKTOP -eq '1'
+  if ($background -and ($resolved.kind -ne 'file' -or [IO.Path]::GetExtension($resolved.target) -notin @('.exe','.com'))) {
+    throw 'WCU_BACKGROUND_DESKTOP_LIMIT: the hidden desktop starts an application executable only. Shortcuts and installed or Store apps open on the user''s desktop (desktop:"current").'
+  }
+  $approved = [bool](Get-Prop $InputObject '_wcuLaunchApproved' $false)
   $arguments = [string](Get-Prop $InputObject 'arguments' '')
   $directory = [string](Get-Prop $InputObject 'workingDirectory' '')
   if ($arguments -match '[\x00\r\n]' -or $directory -match '[\x00-\x1f]') { throw 'LAUNCH_INVALID_ARGUMENTS: arguments and workingDirectory must be single-line strings.' }
   if ($directory) {
     $directory = [Environment]::ExpandEnvironmentVariables($directory)
+    if ($directory -match '^[\\/]{2,}') { throw 'LAUNCH_POLICY_DENIED: network working directories are not supported.' }
     if ($directory -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))' -or -not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'LAUNCH_INVALID_DIRECTORY: supply an existing fully qualified absolute directory.' }
     $directory = (Get-Item -LiteralPath $directory).FullName
   }
@@ -2787,20 +4031,48 @@ function Invoke-LaunchApp {
   # with arguments launch_app would be a command channel the user never sees.
   # They start only without arguments; commands belong to DSH's own shell tool.
   # A shortcut is judged by the program it starts.
-  if ($resolved.kind -eq 'file' -and $arguments.Trim()) {
+  if ($resolved.kind -eq 'file') {
     $program = $resolved.target
+    $effectiveArguments=$arguments
     if ([IO.Path]::GetExtension($program) -ieq '.lnk') {
       $shell = $null; $link = $null
-      try { $shell = New-Object -ComObject WScript.Shell; $link = $shell.CreateShortcut($program); $program = [string]$link.TargetPath }
+      try {
+        $shell = New-Object -ComObject WScript.Shell; $link = $shell.CreateShortcut($program)
+        $program = [Environment]::ExpandEnvironmentVariables([string]$link.TargetPath).Trim()
+        if ([Environment]::ExpandEnvironmentVariables([string]$link.WorkingDirectory).Trim() -match '^[\\/]{2,}') { throw 'LAUNCH_POLICY_DENIED: network shortcut working directories are not supported.' }
+        if ([string]$link.Arguments) { $effectiveArguments = ([string]$link.Arguments + ' ' + $arguments).Trim() }
+      }
       finally { foreach ($com in @($link, $shell)) { if ($null -ne $com) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($com) } } }
+      if ([string]::IsNullOrWhiteSpace($program)) {
+        if (-not $approved) { throw 'WCU_APPROVAL_REQUIRED: launching shortcuts without a direct local target requires host approval.' }
+      } elseif (-not [IO.Path]::IsPathRooted($program)) {
+        $program = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetDirectoryName($resolved.target)) $program))
+      }
     }
-    $commandHosts = @('cmd', 'powershell', 'pwsh', 'wt', 'wsl', 'bash', 'conhost', 'wscript', 'cscript', 'mshta', 'rundll32', 'regsvr32', 'msiexec', 'forfiles', 'schtasks')
-    $name = [IO.Path]::GetFileNameWithoutExtension($program)
-    if ($name -in $commandHosts) { throw "LAUNCH_COMMAND_REFUSED: $name runs the commands in its arguments. launch_app starts command interpreters and script hosts only without arguments; run commands with DSH's own shell tool." }
+    if ($program -match '^[\\/]{2,}') { throw 'LAUNCH_POLICY_DENIED: network shortcut targets are not supported.' }
+    if ($effectiveArguments.Trim() -and -not $approved) { throw 'WCU_APPROVAL_REQUIRED: launching with arguments requires host approval or explicit standalone configuration.' }
+    $commandHosts = @('cmd', 'powershell', 'pwsh', 'wt', 'wsl', 'bash', 'sh', 'conhost', 'wscript', 'cscript', 'mshta', 'rundll32', 'regsvr32', 'msiexec', 'forfiles', 'schtasks', 'pcalua', 'ftp', 'python', 'pythonw', 'node', 'deno', 'bun', 'perl', 'ruby', 'php')
+    $name = ([IO.Path]::GetFileNameWithoutExtension($program.TrimEnd('.', ' '))).ToLowerInvariant()
+    if ($effectiveArguments.Trim() -and $name -in $commandHosts) { throw "LAUNCH_COMMAND_REFUSED: $name runs the commands in its arguments. launch_app starts command interpreters and script hosts only without arguments; run commands with DSH's own shell tool." }
   }
   $waitMs = [int](Get-Prop $InputObject 'waitMs' 1500)
   if ($waitMs -lt 0 -or $waitMs -gt 10000) { throw 'LAUNCH_INVALID_ARGUMENTS: waitMs must be 0-10000.' }
   $before = @(Get-NativeWindowList -MaxWindows 1000 | ForEach-Object { $_.ToArray() } | ForEach-Object { $_.nativeWindowHandle })
+  if ($background) {
+    [void](Test-Failsafe)
+    # Without a folder of its own the app starts in the user's profile folder,
+    # never in this plugin's: an app whose working folder is inside the plugin
+    # keeps the plugin market from replacing it (mcp/update-guard.mjs).
+    $working = if ($directory) { $directory } else { [Environment]::GetFolderPath('UserProfile') }
+    $appPid = [WindowsComputerUseNative]::StartBackgroundProgram($resolved.target,$arguments,$working)
+    if ($waitMs) { Start-Sleep -Milliseconds $waitMs }
+    $observed = @(Get-NativeWindowList -MaxWindows 1000 | ForEach-Object { $_.ToArray() } | Where-Object { $before -notcontains $_.nativeWindowHandle -and $_.processId -eq $appPid })
+    return [ordered]@{
+      ok=$true; action='launch_app'; target=$resolved.target; launchMethod='background-desktop'; verification='dispatched'
+      processId=$appPid; observedNewWindows=$observed
+      note='Use list_windows to check whether the app opened a window here. Some apps reuse an existing instance.'
+    }
+  }
   $shellWindows = $null; $desktop = $null; $document = $null; $application = $null
   try {
     # The desktop folder view belongs to Explorer. Its ShellExecute starts the
@@ -2814,6 +4086,7 @@ function Invoke-LaunchApp {
     $application = $document.Application
     [void](Test-Failsafe)
     $show = if ([bool](Get-Prop $InputObject 'activate' $false)) { 1 } else { 4 }
+    if ($script:WcuLowDisruption) { [WcuInputHold]::Snapshot() }
     $application.ShellExecute($resolved.target, $arguments, $directory, 'open', $show)
   } catch {
     throw ('LAUNCH_SHELL_FAILED: ' + $_.Exception.Message + ' An interactive Explorer desktop is required; the request is not retried as a tool child process.')
@@ -2824,28 +4097,97 @@ function Invoke-LaunchApp {
   }
   if ($waitMs) { Start-Sleep -Milliseconds $waitMs }
   $observed = @(Get-NativeWindowList -MaxWindows 1000 | ForEach-Object { $_.ToArray() } | Where-Object { $before -notcontains $_.nativeWindowHandle })
-  return [ordered]@{
+  $result = [ordered]@{
     ok=$true; action='launch_app'; target=$resolved.target; launchMethod='explorer-shell'; verification='dispatched'
     observedNewWindows=$observed
     note='The shell accepted the request. New windows are observations, not confirmed matches; an app may reuse an existing window or show none. Verify with list_windows/wait_for. activate=false requests no activation, but applications may activate themselves.'
+  }
+  # Low disruption: an app that comes forward by itself does not get the
+  # user's typing; it goes to the window they were in.
+  if ($script:WcuLowDisruption -and $observed.Count -and [WcuInputHold]::ArmGuard([long[]]@($observed | ForEach-Object { [int64]$_.nativeWindowHandle }), [long[]]@($observed | ForEach-Object { [int64]$_.processId }))) {
+    $result['userInput'] = 'If the user types while this app is in front, the foreground goes back to their window first, until they click into it themselves.'
+  }
+  return $result
+}
+
+function Get-DesktopInputMutexName {
+  $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  return "Local\DSH-WCU-Input-v1-$sid"
+}
+
+function Enter-DesktopInput {
+  # The session's input is shared by everything on the user's desktop. A hidden
+  # desktop receives no real input, so its actions skip this lease (-Skip).
+  param([switch]$Skip)
+  if ($Skip) { return $null }
+  # Local names isolate Windows sessions; the SID isolates users in a session.
+  # Never queue or replay an input request after a competing operation.
+  $mutex = New-Object System.Threading.Mutex($false, (Get-DesktopInputMutexName))
+  $owned = $false
+  try {
+    try { $owned = $mutex.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] {
+      # WaitOne acquired the abandoned mutex. Its former action has an unknown
+      # result, so release ownership but require this caller to observe again.
+      $owned = $true
+      throw 'COMPUTER_USE_PREVIOUS_INPUT_INTERRUPTED: Another input process exited unexpectedly. Observe the desktop again before acting; do not replay its input.'
+    }
+    if (-not $owned) { throw 'COMPUTER_USE_BUSY: Another process is operating the desktop. This input was not sent; observe again before a later action.' }
+    return $mutex
+  } catch {
+    if ($owned) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+    throw
+  }
+}
+
+function Exit-DesktopInput {
+  param([object]$Lease)
+  if ($null -ne $Lease) {
+    try { $Lease.ReleaseMutex() } finally { $Lease.Dispose() }
   }
 }
 
 function Invoke-Action {
   param([string]$Action, [object]$inputObject = $null)
 
+  $script:WcuImageData = [bool](Get-Prop $inputObject '_wcuImageData' ($env:WCU_IMAGE_MODE -ne 'file'))
   $script:WcuCornerFailsafe = [bool](Get-Prop $inputObject '_wcuCornerFailsafe' $true)
   # Set by the server: a background attempt (no indicator, no Esc stop) and the
   # operation series (host turn) this call belongs to.
   $script:WcuQuiet = [bool](Get-Prop $inputObject '_wcuQuiet' $false)
   $script:WcuSeries = Get-Prop $inputObject '_wcuSeries' $null
+  $background = $env:WCU_BACKGROUND_DESKTOP -eq '1'
+  # Low disruption on the user's desktop: real input holds the user's own
+  # input and replays it afterwards, and a window DSH leaves in front is
+  # guarded (WcuInputHold).
+  $script:WcuLowDisruption = [bool](Get-Prop $inputObject '_wcuLowDisruption' $false) -and -not $background
+  $script:WcuHolding = $false
+  if ($background) {
+    $nativeTarget = Get-Prop $inputObject 'nativeWindowHandle' $null
+    if ($null -ne $nativeTarget -and [WindowsComputerUseNative]::TopLevelWindows() -notcontains [IntPtr]([long]$nativeTarget)) {
+      throw 'WCU_BACKGROUND_DESKTOP_WINDOW_UNAVAILABLE: the target window is not on this background desktop.'
+    }
+    if ($Action -in @('move','drag','focus','activate_window') -or (Get-Prop $inputObject 'activate' $false) -or
+        ($Action -eq 'element_info' -and $null -ne (Get-Prop $inputObject 'x' $null))) {
+      throw 'WCU_BACKGROUND_DESKTOP_LIMIT: this action requires the input desktop.'
+    }
+  }
+  $inputLease = $null
+  try {
   if ($Action -in @('launch_app','click','double_click','move','drag','scroll','type_text','keypress','focus','invoke','set_value','activate_window','close_window','move_window') -or (Get-Prop $inputObject 'activate' $false)) {
-    if ($env:WCU_CANCEL_EVENT) { [WindowsComputerUseNative]::SetStopListener([int](Get-Prop $inputObject '_wcuTakeoverPid' 0)) }
+    $inputLease = Enter-DesktopInput -Skip:$background
+    $script:TakeoverProcessId = [int](Get-Prop $inputObject '_wcuTakeoverPid' 0)
+    if ($env:WCU_CANCEL_EVENT) { [WindowsComputerUseNative]::SetStopListener($script:TakeoverProcessId) }
     [void](Test-Failsafe)
   }
 
   switch ($Action) {
     "launch_app" { return (Invoke-LaunchApp $inputObject) }
+    "input_state" {
+      $state = [WcuInputHold]::UserState()
+      return [ordered]@{ ok = $true; action = 'input_state'; held = $state.Held; fullscreen = $state.Fullscreen; notification = $state.Notification; foreground = $state.Foreground }
+    }
     "health" {
       $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
       # Health checks backend availability independently of any application's
@@ -2863,21 +4205,23 @@ function Invoke-Action {
         uiAutomation = $true
         treeObservation = @{cached=$true; defaultTreeTimeoutMs=5000; providerCallInterruptible=$false; chromiumHint="Use a scoped control tree; if traversal truncates or times out, check responsiveness before retrying and prefer screenshot/ocr."}
         screenshot = $true
-        sendInput = $true
+        sendInput = (-not $background)
+        desktopTarget = if ($background) { 'background' } else { 'current' }
         postmessage = $true
         ocr = "lazy"
         homing = $true
-        failsafe = ([string]$env:WCU_FAILSAFE -ne '0')
+        failsafe = ($script:WcuCornerFailsafe -and [string]$env:WCU_FAILSAFE -ne '0')
         activeWindow = $active
         uiAutomationProviderChecked = $false
         targetResponsive = Get-WindowResponsive $active
+        inputDesktopAvailable = Invoke-Safe { if ([WindowsComputerUseNative].GetMethod('IsInputDesktopAvailable') -ne $null) { [WindowsComputerUseNative]::IsInputDesktopAvailable() } else { $true } } $false
         virtualScreen = [ordered]@{ x = $screen.Left; y = $screen.Top; width = $screen.Width; height = $screen.Height }
       })
     }
     "snapshot" {
       $scope = Get-Prop $inputObject "scope" "active_window"
       $includeScreenshot = [bool](Get-Prop $inputObject "includeScreenshot" $true)
-      $captureWindow = [bool](Get-Prop $inputObject "captureWindow" $false)
+      $captureWindow = [bool](Get-Prop $inputObject "captureWindow" (Has-WindowTarget $inputObject))
       $maxWidth = [int](Get-Prop $inputObject "maxWidth" 1600)
       $maxDepth = [int](Get-Prop $inputObject "maxDepth" 5)
       $maxNodes = [int](Get-Prop $inputObject "maxNodes" 250)
@@ -2887,12 +4231,15 @@ function Invoke-Action {
         # The window DSH works in may be behind the user's window: then the
         # screen shows the user's window, so capture DSH's window itself.
         $behind = $scope -ne 'desktop' -and -not (Has-WindowTarget $inputObject) -and (Get-WorkWindow) -ne [WindowsComputerUseNative]::GetForegroundWindow().ToInt64()
-        if (($captureWindow -or $behind) -and $treeResult.targetResponsive -ne $false) {
+        if (($captureWindow -or $behind -or $background) -and $treeResult.targetResponsive -ne $false) {
           $winEl = Get-ObservationWindow $inputObject $scope
         }
         $treeResult.screenshot = Capture-Screenshot -WindowElement $winEl -MaxWidth $maxWidth
         if ($treeResult.screenshot.occludedPossible) {
           $treeResult["warning"] = (([string]$treeResult.warning + " The window capture may include an occluding window; inspect screenshot.occludedPossible.").Trim())
+        }
+        if ($treeResult.screenshot.minimized) {
+          $treeResult["warning"] = (([string]$treeResult.warning + " The window is minimized: the capture shows only its title strip. Call activate_window to restore it.").Trim())
         }
       }
       return $treeResult
@@ -2906,8 +4253,16 @@ function Invoke-Action {
     "list_windows" {
       $includeInvisible = [bool](Get-Prop $inputObject "includeInvisible" $false)
       $maxWindows = [int](Get-Prop $inputObject "maxWindows" 50)
-      $windows = Get-NativeWindowList -IncludeInvisible $includeInvisible -MaxWindows $maxWindows -RecordObservation
-      return ([ordered]@{ ok = $true; windows = @($windows.ToArray()) })
+      # Minimized windows are listed: they are still there and can be targeted
+      # (activate_window restores them). batch keeps to shown ones.
+      $includeMinimized = [bool](Get-Prop $inputObject "includeMinimized" $true)
+      $windows = Get-NativeWindowList -IncludeInvisible $includeInvisible -MaxWindows $maxWindows -RecordObservation -IncludeMinimized $includeMinimized
+      # A minimized window's box is the -32000,-32000 parking spot: leave it out
+      # rather than let it read as a position.
+      $listed = @($windows.ToArray() | ForEach-Object { if ($_.Contains('minimized')) { [ordered]@{ id = $_.id; name = $_.name; className = $_.className; processId = $_.processId; nativeWindowHandle = $_.nativeWindowHandle; isOffscreen = $true; minimized = $true } } else { $_ } })
+      $listing = [ordered]@{ ok = $true; windows = $listed }
+      if ($script:WindowListTruncated) { $listing['truncated'] = $true; $listing['truncationReason'] = "maxWindows ($maxWindows) reached; pass a larger maxWindows (up to 200) to list the rest." }
+      return $listing
     }
     "find" {
       $query = Get-Prop $inputObject "query" ""
@@ -2982,7 +4337,7 @@ function Invoke-Action {
       if ((Has-WindowTarget $inputObject) -and ($null -eq $point.elementId)) {
         $target = Get-ObservationWindow $inputObject
         Assert-WindowIdentity $inputObject $target
-        $homed = Home-Point -X $point.x -Y $point.y -Target $target
+        $homed = Home-Point -X $point.x -Y $point.y -Target $target -ObservationToken ([string](Get-Prop $inputObject 'observationToken' ''))
         $point.x = $homed.x
         $point.y = $homed.y
         if ($null -ne $homed.homed) { $result["homed"] = $homed.homed }
@@ -3000,12 +4355,18 @@ function Invoke-Action {
           if ($null -ne $patternMethod) {
             $result["method"] = "background:$patternMethod"
             Add-BackgroundReport $result
+            Set-WorkWindow (Get-ElementWindow $point.element)
             return $result
           }
         }
+        # Auto is a background-first policy, not permission to silently post
+        # an unhandled mouse message. Upgrade before sending any real input.
+        if ($dispatch -ne 'background') {
+          Assert-InputAllowed 'This element has no background click pattern'
+        } else {
         $hwnd = 0
         if ($null -ne $point.element) { $hwnd = Invoke-Safe { [int64]$point.element.Current.NativeWindowHandle } 0 }
-        if (-not ($hwnd -and $hwnd -ne 0)) { $hwnd = Resolve-TargetHwnd $inputObject }
+        if (-not ($hwnd -and $hwnd -ne 0)) { $hwnd = if ($null -ne $point.element) { Get-ElementWindow $point.element } else { Resolve-TargetHwnd $inputObject } }
         if (-not ($hwnd -and $hwnd -ne 0)) {
           throw "background_unavailable: no window handle to post to. Retry with dispatch:'foreground'."
         }
@@ -3016,6 +4377,7 @@ function Invoke-Action {
         $result["verified"] = $false
         $result["note"] = "Background click queued, delivery unverified. Chromium/Electron/UWP content may ignore PostMessage; if nothing happened, retry with dispatch:'foreground'."
         return $result
+        }
       }
 
       Assert-InputAllowed 'This click'
@@ -3026,8 +4388,11 @@ function Invoke-Action {
       $hwnd = if (Has-WindowTarget $inputObject) { [int64](Get-ObservationWindow $inputObject).nativeWindowHandle } elseif ($null -ne $point.element) { Get-ElementWindow $point.element } else { Get-RootWindowAt $point.x $point.y }
       $state = Start-Input -InputObject $inputObject -Hwnd $hwnd -NoActivate:(-not $targeted)
       try {
-        if ($targeted) { Assert-PointOnTarget $point.x $point.y $hwnd }
+        Confirm-ElementPoint $point
+        if ($targeted) { Assert-PointOnTarget $point.x $point.y $hwnd $state }
+        $result.x = $point.x; $result.y = $point.y
         $state.moved = @{ x = $point.x; y = $point.y }
+        $state.drain = $true
         Click-At -X $point.x -Y $point.y -Button $button -Count 1
         $result["method"] = "sendinput"
       } finally { Complete-Input $state $result }
@@ -3037,12 +4402,13 @@ function Invoke-Action {
       [void](Test-Failsafe)
       $point = Get-PointFromArgs $inputObject
       $button = Get-Prop $inputObject "button" "left"
+      [void](Get-ButtonFlags $button)
       $dispatch = [string](Get-Prop $inputObject "dispatch" "auto")
       $result = [ordered]@{ ok = $true; action = "double_click"; x = $point.x; y = $point.y; button = $button; elementId = $point.elementId }
       if ((Has-WindowTarget $inputObject) -and ($null -eq $point.elementId)) {
         $target = Get-ObservationWindow $inputObject
         Assert-WindowIdentity $inputObject $target
-        $homed = Home-Point -X $point.x -Y $point.y -Target $target
+        $homed = Home-Point -X $point.x -Y $point.y -Target $target -ObservationToken ([string](Get-Prop $inputObject 'observationToken' ''))
         $point.x = $homed.x
         $point.y = $homed.y
         if ($null -ne $homed.homed) { $result["homed"] = $homed.homed }
@@ -3066,8 +4432,11 @@ function Invoke-Action {
       $hwnd = if (Has-WindowTarget $inputObject) { [int64](Get-ObservationWindow $inputObject).nativeWindowHandle } elseif ($null -ne $point.element) { Get-ElementWindow $point.element } else { Get-RootWindowAt $point.x $point.y }
       $state = Start-Input -InputObject $inputObject -Hwnd $hwnd -NoActivate:(-not $targeted)
       try {
-        if ($targeted) { Assert-PointOnTarget $point.x $point.y $hwnd }
+        Confirm-ElementPoint $point
+        if ($targeted) { Assert-PointOnTarget $point.x $point.y $hwnd $state }
+        $result.x = $point.x; $result.y = $point.y
         $state.moved = @{ x = $point.x; y = $point.y }
+        $state.drain = $true
         Click-At -X $point.x -Y $point.y -Button $button -Count 2
         $result["method"] = "sendinput"
       } finally { Complete-Input $state $result }
@@ -3081,7 +4450,7 @@ function Invoke-Action {
       if ((Has-WindowTarget $inputObject) -and ($null -eq $point.elementId)) {
         $target = Get-ObservationWindow $inputObject
         Assert-WindowIdentity $inputObject $target
-        $homed = Home-Point -X $point.x -Y $point.y -Target $target
+        $homed = Home-Point -X $point.x -Y $point.y -Target $target -ObservationToken ([string](Get-Prop $inputObject 'observationToken' ''))
         $point.x = $homed.x
         $point.y = $homed.y
         if ($null -ne $homed.homed) { $result["homed"] = $homed.homed }
@@ -3100,7 +4469,7 @@ function Invoke-Action {
       if (Has-WindowTarget $inputObject) {
         $target = Get-ObservationWindow $inputObject
         Assert-WindowIdentity $inputObject $target
-        $homed = Home-Point -X ([int]$path[0].x) -Y ([int]$path[0].y) -Target $target
+        $homed = Home-Point -X ([int]$path[0].x) -Y ([int]$path[0].y) -Target $target -ObservationToken ([string](Get-Prop $inputObject 'observationToken' ''))
         if ($null -ne $homed.homed) {
           $dx = $homed.homed.dx
           $dy = $homed.homed.dy
@@ -3116,15 +4485,19 @@ function Invoke-Action {
       $result = [ordered]@{ ok = $true; action = "drag"; points = $path.Count; button = $button; homed = if ($null -ne $homed) { $homed.homed } else { $null } }
       $state = Start-Input -InputObject $inputObject -Hwnd $hwnd -NoActivate:(-not $targeted)
       try {
-        if ($targeted) { Assert-PointOnTarget ([int]$first.x) ([int]$first.y) $hwnd }
+        if ($targeted) { Assert-PointOnTarget ([int]$first.x) ([int]$first.y) $hwnd $state }
         Move-ToPoint -X ([int]$first.x) -Y ([int]$first.y)
         Start-Sleep -Milliseconds 50
+        $state.drain = $true
         try {
           if ([WindowsComputerUseNative]::SendMouseEvent(0, 0, [uint32]$flags[0], 0) -ne 1) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected mouse input.' }
+          # Under Low disruption the user's input waits for the stroke, so a
+          # long one moves faster: about a second at most.
+          $pause = if ($script:WcuLowDisruption -and $path.Count -gt 40) { [Math]::Max(8, [int](1000 / $path.Count)) } else { 25 }
           foreach ($pt in $path) {
             [void](Test-Failsafe)
             Move-ToPoint -X ([int]$pt.x) -Y ([int]$pt.y)
-            Start-Sleep -Milliseconds 25
+            Start-Sleep -Milliseconds $pause
           }
           $state.moved = @{ x = [int]$last.x; y = [int]$last.y }
         } finally {
@@ -3141,7 +4514,7 @@ function Invoke-Action {
       if ((Has-WindowTarget $inputObject) -and ($null -eq $point.elementId)) {
         $target = Get-ObservationWindow $inputObject
         Assert-WindowIdentity $inputObject $target
-        $homed = Home-Point -X $point.x -Y $point.y -Target $target
+        $homed = Home-Point -X $point.x -Y $point.y -Target $target -ObservationToken ([string](Get-Prop $inputObject 'observationToken' ''))
         $point.x = $homed.x
         $point.y = $homed.y
       }
@@ -3153,6 +4526,7 @@ function Invoke-Action {
         if ($null -ne $scrolled) {
           foreach ($key in $scrolled.Keys) { $result[$key] = $scrolled[$key] }
           Add-BackgroundReport $result
+          Set-WorkWindow (Get-ElementWindow $point.element)
           return $result
         }
         Assert-InputAllowed 'Scrolling this element'
@@ -3162,7 +4536,7 @@ function Invoke-Action {
         $hwnd = if (Has-WindowTarget $inputObject) { [int64](Get-ObservationWindow $inputObject).nativeWindowHandle } elseif ($null -ne $point.element) { Get-ElementWindow $point.element } else { Get-RootWindowAt $point.x $point.y }
         $state = Start-Input -InputObject $inputObject -Hwnd $hwnd -NoActivate:(-not $targeted)
         try {
-          if ($targeted) { Assert-PointOnTarget $point.x $point.y $hwnd }
+          if ($targeted) { Assert-PointOnTarget $point.x $point.y $hwnd $state }
           $state.moved = @{ x = $point.x; y = $point.y }
           Move-ToPoint -X $point.x -Y $point.y
           Start-Sleep -Milliseconds 30
@@ -3183,7 +4557,7 @@ function Invoke-Action {
       [void](Test-Failsafe)
       $method = [string](Get-Prop $inputObject "method" "auto")
       $text = [string](Get-Prop $inputObject "text" "")
-      if ([string]::IsNullOrWhiteSpace($text)) { throw "text is required." }
+      if ($text.Length -eq 0) { throw "text is required." }
 
       # auto (default): a Win32 edit with the focus in the window the text goes
       # to takes it in the background (Set-FocusedEditText); any other control
@@ -3193,6 +4567,7 @@ function Invoke-Action {
         if ((Get-Prop $inputObject 'focusMode' 'preserve') -ne 'main' -and -not [bool](Get-Prop $inputObject 'activate' $false)) {
           if (Has-WindowTarget $inputObject) { Assert-WindowIdentity $inputObject (Get-ObservationWindow $inputObject) }
           $window = Resolve-InputWindow $inputObject
+          $via = $script:InputWindowVia
           $typed = Set-FocusedEditText $window $text
           if ($null -ne $typed) {
             $script:InputWindow = @{ series = $script:WcuSeries; hwnd = [int64]$window; at = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() }
@@ -3200,7 +4575,7 @@ function Invoke-Action {
             # now holds it.
             $value = Get-ValueText (Invoke-Safe { [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$typed.hwnd) } $null)
             $verified = $typed.grew -eq $text.Length -or ($null -ne $value -and $value.Contains($text))
-            $result = [ordered]@{ ok = $true; action = "type_text"; length = $text.Length; method = "background:EM_REPLACESEL"; verified = $verified }
+            $result = [ordered]@{ ok = $true; action = "type_text"; length = $text.Length; method = "background:EM_REPLACESEL"; verified = $verified; deliveredTo = (Get-KeyDestination $window $via) }
             if ($null -ne $value) { $result["verifyValue"] = if ($value.Length -gt 200) { $value.Substring(0, 200) + "..." } else { $value } }
             if (-not $verified) { $result["note"] = "The field's length changed by $($typed.grew), not by the length of the text: it may limit its length or drop some characters. Check the field." }
             return $result
@@ -3242,7 +4617,9 @@ function Invoke-Action {
         Assert-WindowIdentity $inputObject $target
       }
       $result = [ordered]@{ ok = $true; action = "type_text"; length = $text.Length; focusedControl = $null }
-      $state = Start-Input -InputObject $inputObject -Hwnd (Resolve-InputWindow $inputObject)
+      $inputHwnd = Resolve-InputWindow $inputObject
+      $via = $script:InputWindowVia
+      $state = Start-Input -InputObject $inputObject -Hwnd $inputHwnd
       try {
         if ($null -ne $target -and (Get-Prop $inputObject 'focusMode' 'preserve') -eq 'main') {
           $uiaTarget = Resolve-TargetWindow $inputObject
@@ -3250,22 +4627,39 @@ function Invoke-Action {
           if ($null -eq $focusedControl) { throw 'Could not focus the requested main text control; no text sent.' }
           $result["focusedControl"] = $focusedControl
         }
+        $destination = Get-KeyDestination ([WindowsComputerUseNative]::GetForegroundWindow().ToInt64()) $via
         Assert-InFront $state
+        $result["deliveredTo"] = $destination
         if ($method -eq "sendinput") {
-          $ok = [bool][WindowsComputerUseNative]::SendUnicodeText($text)
-          if (-not $ok) { throw "method:'sendinput' dropped some key events (input queue full). Retry, or use method:'clipboard'." }
+          $front = [WindowsComputerUseNative]::GetForegroundWindow()
+          $focus = [WindowsComputerUseNative]::FocusedWindow($front)
+          $edit = Get-SendInputEdit $focus $text
+          Assert-InFront $state
+          if ([WindowsComputerUseNative]::GetForegroundWindow() -ne $front -or [WindowsComputerUseNative]::FocusedWindow($front) -ne $focus) {
+            throw 'INPUT_FOCUS_CHANGED: focus changed before typing. No input was sent.'
+          }
+          [void](Test-Failsafe)
+          $ok = [bool][WindowsComputerUseNative]::SendUnicodeText($text, $front, $focus)
+          $typed = Wait-SendInputEdit $front $focus $edit $text.Length
+          if (-not $ok -or $typed -eq 'incomplete') {
+            throw 'INPUT_TEXT_INCOMPLETE: the full text was not confirmed in the target. Some text may already be present. Inspect the field before retrying.'
+          }
           $result["method"] = "sendinput-unicode"
-          $result["note"] = "Synthesized Unicode key events; target was foreground + focused. Works on password fields (no paste)."
+          $result["verified"] = ($typed -eq 'observed') -or ($typed -eq 'changed')
+          $result["verification"] = if ($result["verified"]) { 'observed' } else { 'unconfirmed' }
+          if ($typed -eq 'changed') { $result["note"] = 'The field holds the typed text, and the application added text or changed letter case (for example autocomplete). Check the field if the exact value matters.' }
+          elseif ($null -eq $typed) { $result["note"] = 'Windows queued the Unicode input. The edited field could not be verified. Check the field before retrying.' }
         } else {
           $restore = [bool](Get-Prop $inputObject "restoreClipboard" $true)
           Type-Text -Text $text -RestoreClipboard $restore
           $result["restoreClipboard"] = $restore
           $result["method"] = "clipboard-paste"
+          if ($script:LastPasteInfo) { foreach ($entry in $script:LastPasteInfo.GetEnumerator()) { $result[$entry.Key] = $entry.Value } }
+          $result["verified"] = $false
+          if ($script:LastPasteInfo -and -not $script:LastPasteInfo.clipboardRestored -and $restore) { $result["clipboardRestoreNote"] = 'Previous clipboard was not restored because the target read was not confirmed or restoration failed; requested text remains available for a late paste.' }
         }
       } finally { Complete-Input $state $result }
-      # Closed-loop verification: read back the value of the control we typed
-      # into, so the model gets evidence instead of a blind "ok". (Skipped for
-      # sendinput on password fields, which deliberately hide their value.)
+      # Clipboard: provide the requested main control's value when available.
       if ($method -ne "sendinput" -and $null -ne $focusedControl -and $null -ne $target) {
         $verify = Get-BestTextControl $uiaTarget
         if ($null -ne $verify) {
@@ -3309,13 +4703,28 @@ function Invoke-Action {
         if ($typed -ne $true) { $result["note"] = "Background key queued to the focused control, delivery unverified." }
         return $result
       }
-      $chord = Convert-KeyChord -Keys $keys
-      $result = [ordered]@{ ok = $true; action = "keypress"; keys = $keys; sendKeys = $chord; method = "sendkeys" }
-      $state = Start-Input -InputObject $inputObject -Hwnd (Resolve-InputWindow $inputObject)
+      $sequence = New-Object 'System.Collections.Generic.List[object]'
+      $sequence.Add([string[]]$keys)
+      foreach($next in @(Get-Prop $inputObject 'thenKeys' @())){$sequence.Add([string[]]$next)}
+      $chords = @($sequence | ForEach-Object { Convert-KeyChord -Keys $_ })
+      $result = [ordered]@{ ok = $true; action = "keypress"; keys = $keys; sendKeys = $chords[0]; method = "sendinput" }
+      if($sequence.Count -gt 1){$result['thenKeys']=@(Get-Prop $inputObject 'thenKeys' @());$result['chordsSent']=0}
+      $inputHwnd = Resolve-InputWindow $inputObject
+      $via = $script:InputWindowVia
+      $state = Start-Input -InputObject $inputObject -Hwnd $inputHwnd
       try {
-        [void](Test-Failsafe)
-        Assert-InFront $state
-        [System.Windows.Forms.SendKeys]::SendWait($chord)
+        for($i=0;$i -lt $sequence.Count;$i++){
+          if($i -gt 0){Start-Sleep -Milliseconds ([int](Get-Prop $inputObject 'intervalMs' 60))}
+          [void](Test-Failsafe)
+          # The keys reach the focused control of the window in front: name both
+          # (deliveredTo), so a result shows where they went, not only "sent".
+          if($i -eq 0){$destination=Get-KeyDestination ([WindowsComputerUseNative]::GetForegroundWindow().ToInt64()) $via}
+          Assert-InFront $state
+          $state.drain = $true
+          if (-not [WindowsComputerUseNative]::SendKeyChord([string[]]$sequence[$i])) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected the key chord.' }
+          if($i -eq 0){$result['deliveredTo']=$destination}
+          if($sequence.Count -gt 1){$result['chordsSent']=$i+1}
+        }
       } finally { Complete-Input $state $result }
       return $result
     }
@@ -3338,11 +4747,13 @@ function Invoke-Action {
       if ($kind -ne 'default') {
         $result = [ordered]@{ ok = $true; action = "invoke"; elementId = $elementId; elementAction = $kind; method = (Invoke-ElementAction $el $kind) }
         Add-BackgroundReport $result
+        Set-WorkWindow (Get-ElementWindow $el)
         return $result
       }
       $method = Invoke-ElementPattern $el
       $result = [ordered]@{ ok = $true; action = "invoke"; elementId = $elementId; method = $method }
       Add-BackgroundReport $result
+      if ($null -ne $method) { Set-WorkWindow (Get-ElementWindow $el) }
       if ($null -eq $method -and $fallback) {
         $rect = Convert-Rect (Invoke-Safe { $el.Current.BoundingRectangle } $null)
         if ($null -eq $rect) { throw "Element has no invokable pattern and no bounding box for fallback click." }
@@ -3350,9 +4761,12 @@ function Invoke-Action {
         $hwnd = Get-ElementWindow $el
         $state = Start-Input -InputObject $inputObject -Hwnd $hwnd
         try {
-          Assert-PointOnTarget $rect.centerX $rect.centerY $hwnd
-          $state.moved = @{ x = $rect.centerX; y = $rect.centerY }
-          Click-At -X $rect.centerX -Y $rect.centerY -Button "left" -Count 1
+          $point = @{element=$el; x=$rect.centerX; y=$rect.centerY}
+          Confirm-ElementPoint $point
+          Assert-PointOnTarget $point.x $point.y $hwnd $state
+          $state.moved = @{ x = $point.x; y = $point.y }
+          $state.drain = $true
+          Click-At -X $point.x -Y $point.y -Button "left" -Count 1
           $result["method"] = "ClickFallback"
         } finally { Complete-Input $state $result }
         return $result
@@ -3369,6 +4783,7 @@ function Invoke-Action {
       $method = Set-ElementValue $el -Value $value
       $result = [ordered]@{ ok = $true; action = "set_value"; elementId = $elementId; method = $method; length = $value.Length }
       Add-BackgroundReport $result
+      if ($null -ne $method) { Set-WorkWindow (Get-ElementWindow $el) }
       if ($null -eq $method -and $fallback) {
         Assert-InputAllowed 'This element has no ValuePattern; typing into it'
         [void](Test-Failsafe)
@@ -3376,10 +4791,12 @@ function Invoke-Action {
         $state = Start-Input -InputObject $inputObject -Hwnd $hwnd
         try {
           $el.SetFocus()
-          # Keys go to the window in front: never send them elsewhere.
-          $front = [WindowsComputerUseNative]::GetForegroundWindow().ToInt64()
-          if ($hwnd -and (Get-WindowProcessId $front) -ne (Get-WindowProcessId $hwnd)) { throw "The element's window is not in front after focusing it, so no text was sent." }
-          [System.Windows.Forms.SendKeys]::SendWait("^a")
+          Assert-InFront $state
+          Assert-ElementFocus $el
+          if (-not [WindowsComputerUseNative]::SendKeyChord(@('ctrl','a'))) { throw 'COMPUTER_USE_INPUT_UNAVAILABLE: Windows rejected select-all input.' }
+          # Ctrl+A can trigger application handlers that move focus.
+          Assert-InFront $state
+          Assert-ElementFocus $el
           Type-Text -Text $value -RestoreClipboard $restore
           $result["method"] = "FocusSelectAllTypeFallback"
         } finally { Complete-Input $state $result }
@@ -3397,14 +4814,26 @@ function Invoke-Action {
         $result["warning"] = "The target window is unresponsive; activation was skipped. Do not retry tree or input calls until the target recovers."
         return $result
       }
+      $hwnd = [int64]$window.nativeWindowHandle
+      $wasMinimized = [WindowsComputerUseNative]::IsIconic([IntPtr]$hwnd)
+      if ($script:WcuLowDisruption) { [WcuInputHold]::Snapshot() }
       $result.activated = [bool](Set-WindowForeground $window)
-      Update-WindowCache $window
+      # Report the window as it is now. The entry above was read before the
+      # activation, so a window just restored would still show its minimized
+      # -32000 box and read as "nothing happened" (issue #82).
+      foreach ($now in (Get-NativeWindowList -IncludeInvisible $true -MaxWindows 4096)) {
+        if ([int64]$now.nativeWindowHandle -eq $hwnd) { $result.window = $now; break }
+      }
+      $stillMinimized = [WindowsComputerUseNative]::IsIconic([IntPtr]$hwnd)
+      if ($wasMinimized) { $result['restored'] = -not $stillMinimized }
+      if ($stillMinimized) { $result.activated = $false } else { Update-WindowCache $result.window }
       Update-WindowIdentity $inputObject $window
       # Kept in front by request; typing without a target goes here too.
-      if ($result.activated) { $script:InputWindow = @{ series = $script:WcuSeries; hwnd = [int64]$window.nativeWindowHandle; at = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() } }
+      if ($result.activated) { $script:InputWindow = @{ series = $script:WcuSeries; hwnd = $hwnd; at = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() } }
+      if ($result.activated -and $script:WcuLowDisruption -and [WcuInputHold]::ArmGuard([long[]]@($hwnd), [long[]]@([int64](Get-WindowProcessId $hwnd)))) { $result['userInput'] = [WcuInputHold]::GuardNote }
       if (-not $result.activated) {
         $result["targetResponsive"] = Get-WindowResponsive $window
-        $result["warning"] = if ($result.targetResponsive) { "The window could not be brought to the foreground (Windows foreground lock)." } else { "The target window became unresponsive; avoid repeated activation, tree or input calls." }
+        $result["warning"] = if ($stillMinimized) { "The window is still minimized: Windows did not restore it. Try again; if it stays minimized, ask the user to restore it." } elseif ($result.targetResponsive) { "The window could not be brought to the foreground (Windows foreground lock)." } else { "The target window became unresponsive; avoid repeated activation, tree or input calls." }
       }
       return $result
     }
@@ -3449,7 +4878,9 @@ function Invoke-Action {
             if (Test-TargetMatch $info $inputObject) { $found=$true; break }
           }
         } elseif ($condition -eq 'text') {
+          # Internal observations never expose an image path to the host.
           $observationArgs = [pscustomobject]@{scope=(Get-Prop $inputObject 'scope' 'active_window');windowTitle=(Get-Prop $inputObject 'windowTitle' $null);processId=(Get-Prop $inputObject 'processId' $null);nativeWindowHandle=(Get-Prop $inputObject 'nativeWindowHandle' $null);query=$query;resolveControl=$false;activate=$false;_wcuSeries=$script:WcuSeries}
+          $observationArgs | Add-Member NoteProperty '_wcuInternalOcr' $true
           $observation = Invoke-Action 'ocr' $observationArgs
           $found = $observation.matched.Count -gt 0
           $conclusive = -not [bool]$observation.occludedPossible
@@ -3488,6 +4919,7 @@ function Invoke-Action {
       $el = Get-ObservationWindow $inputObject
       $hwnd = [int64]$el.nativeWindowHandle
       if (-not ($hwnd -and $hwnd -ne 0)) { throw "No window handle found for the target." }
+      Assert-NativeInputTarget $hwnd
       $flags = [uint32]([WindowsComputerUseNative]::SWP_NOSIZE -bor [WindowsComputerUseNative]::SWP_NOZORDER)
       if (-not [bool](Get-Prop $inputObject "activate" $false)) {
         $flags = [uint32]($flags -bor [WindowsComputerUseNative]::SWP_NOACTIVATE)
@@ -3517,7 +4949,10 @@ function Invoke-Action {
       }
       $responsive = Get-WindowResponsive $window
       $shot = Capture-Screenshot -WindowElement $(if ($responsive -eq $false) { $null } else { $window }) -MaxWidth ([int](Get-Prop $inputObject 'maxWidth' 1600))
-      return ([ordered]@{ok=$true;action='screenshot';source='win32';targetResponsive=$responsive;screenshot=$shot;degraded=($responsive -eq $false)})
+      $result=[ordered]@{ok=$true;action='screenshot';source='win32';targetResponsive=$responsive;screenshot=$shot;degraded=($responsive -eq $false)}
+      if ($shot.minimized) { $result['warning'] = 'The window is minimized: Windows draws only its title strip. Call activate_window to restore it, then capture again.' }
+      if ($null -ne $window) { $result['windowObservation']=$script:WindowCache[[string]$window.nativeWindowHandle] }
+      return $result
     }
     "ocr" {
       # OCR the target window (or the whole desktop) — the fallback for
@@ -3533,13 +4968,19 @@ function Invoke-Action {
       $query = [string](Get-Prop $inputObject "query" "")
       $winEl = $null
       $activationRefused = $false
+      $activationError = $null
       if (Has-WindowTarget $inputObject) {
         $winEl = Get-ObservationWindow $inputObject $scope
         # Capture happens on screen pixels: an occluded window would OCR the
         # overlapping content, so honour activate:true before capturing. A
         # refused activation degrades the capture but is not fatal — warn.
-        if ([bool](Get-Prop $inputObject "activate" $false) -and -not (Set-WindowForeground $winEl)) {
-          $activationRefused = $true
+        if ([bool](Get-Prop $inputObject "activate" $false)) {
+          try { $activationRefused = -not (Set-WindowForeground $winEl) }
+          catch {
+            if ($_.Exception.Message -notmatch '^(INPUT_TARGET_ACCESS_UNCONFIRMED|ELEVATED_TARGET_DENIED):') { throw }
+            $activationRefused = $true
+            $activationError = $_.Exception.Message
+          }
         }
       } elseif ($scope -ne "desktop") {
         $winEl = Get-ObservationWindow $inputObject $scope
@@ -3549,33 +4990,38 @@ function Invoke-Action {
         Update-WindowCache $winEl
         Update-WindowIdentity $inputObject $winEl
       }
-      $shot = Capture-Screenshot -WindowElement $winEl -MaxWidth $maxWidth
+      $internalOcr = [bool](Get-Prop $inputObject '_wcuInternalOcr' $false)
+      $shot = Capture-Screenshot -WindowElement $winEl -MaxWidth $maxWidth -InMemory:$internalOcr
       if ($shot.windowCaptureFailed) { throw "OCR target has no capturable surface (minimized/hidden?). Restore the window and retry." }
+      if ($shot.minimized) { throw "OCR target window is minimized: Windows draws only its title strip, so there is no text to read. Call activate_window to restore it, then read again." }
       $origX = [int]$shot.bounds.x
       $origY = [int]$shot.bounds.y
       $scale = 1.0
       if ($null -ne $shot.imageScale) { $scale = [double]$shot.imageScale }
-      $ocr = Invoke-Ocr -PngPath $shot.path -Language $language
-      $lines = @()
+      $ocr = if ($internalOcr) { Invoke-Ocr -PngBytes $shot.pngBytes -Language $language } else { Invoke-Ocr -PngPath $shot.path -Language $language }
+      $lines = New-Object System.Collections.Generic.List[object]
       foreach ($line in $ocr.lines) {
-        $words = @()
+        $words = New-Object System.Collections.Generic.List[object]
         foreach ($w in $line.words) {
-          $words += [ordered]@{
+          $words.Add([ordered]@{
             text = $w.text
             x = [int]($origX + ($w.x / $scale))
             y = [int]($origY + ($w.y / $scale))
             width = [int]($w.width / $scale)
             height = [int]($w.height / $scale)
-          }
+          })
         }
-        $lines += [ordered]@{ text = $line.text; words = $words; boundingBox = (Get-OcrWordBounds -Words $words) }
+        $wordArr = $words.ToArray()
+        $lines.Add([ordered]@{ text = $line.text; words = $wordArr; boundingBox = (Get-OcrWordBounds -Words $wordArr) })
       }
       # OCR -> control upgrade: ignore OCR whitespace when matching, then
       # hit-test the center of the matching word run's union box with UIA.
-      $matched = @()
+      $matched = New-Object System.Collections.Generic.List[object]
+      $matchedLines = New-Object System.Collections.Generic.List[object]
       if ($query.Length -gt 0 -and $lines.Count -gt 0) {
         if ([bool](Get-Prop $inputObject 'resolveControl' $false) -and $null -ne $winEl) {
-          [void](Initialize-ChromiumPages $winEl @{ watch = [Diagnostics.Stopwatch]::StartNew(); budgetMs = 2000 })
+          if ($winEl.className -eq 'MozillaWindowClass') { [void](Initialize-GeckoPages $winEl @{ watch = [Diagnostics.Stopwatch]::StartNew(); budgetMs = 2000 }) }
+          else { [void](Initialize-ChromiumPages $winEl @{ watch = [Diagnostics.Stopwatch]::StartNew(); budgetMs = 2000 }) }
         }
         foreach ($line in $lines) {
           if ($matched.Count -ge 3) { break }
@@ -3596,14 +5042,15 @@ function Invoke-Action {
               boundingBox = Convert-Rect (Invoke-Safe { $el.Current.BoundingRectangle } $null)
             }
           }
-          $matched += [ordered]@{ source = "ocr"; line = $lineText; word = [ordered]@{ text = $hit.text; x = $wx; y = $wy }; boundingBox = $hit.boundingBox; control = $ctl }
+          $matched.Add([ordered]@{ source = "ocr"; line = $lineText; word = [ordered]@{ text = $hit.text; x = $wx; y = $wy }; boundingBox = $hit.boundingBox; control = $ctl })
+          $matchedLines.Add($line)
         }
       }
       $result = [ordered]@{
         ok = $true
         action = "ocr"
         text = $ocr.text
-        lines = $lines
+        lines = $lines.ToArray()
         image = $shot.path
         imageBounds = $shot.bounds
         source = if ($winEl -ne $null) { "window" } else { "desktop" }
@@ -3619,11 +5066,24 @@ function Invoke-Action {
       if ([bool](Get-Prop $inputObject 'includeScreenshot' $false)) { $result['screenshot'] = $shot }
       if ($query.Length -gt 0) {
         $result["query"] = $query
-        $result["matched"] = $matched
-        if ($matched.Count -eq 0) { $result["note"] = "No OCR word sequence matched the query (case-insensitive, ignoring whitespace). Inspect 'lines' for the recognized text and word boxes." }
+        $result["matched"] = $matched.ToArray()
+        # A query asks for that text, not the whole transcript. Word boxes of
+        # every line are most of a result (about 50,000 characters for a
+        # 1500x900 window of text), so keep the matching lines whole and,
+        # without a match, line texts and boxes to reformulate from (#82).
+        $result.Remove('text')
+        $result["lineCount"] = $lines.Count
+        if ($matchedLines.Count -gt 0) {
+          $result["lines"] = $matchedLines.ToArray()
+          $result["note"] = "'lines' holds only the lines with a match; lineCount counts every recognized line. Call ocr without query for all text and word boxes."
+        } else {
+          $result["lines"] = @($lines | ForEach-Object { [ordered]@{ text = $_.text; boundingBox = $_.boundingBox } })
+          $result["note"] = "No OCR word sequence matched the query (case-insensitive, ignoring whitespace). 'lines' holds every recognized line with its box; call ocr without query for word boxes."
+        }
       }
       if ($activationRefused) {
-        $result["warning"] = "activate:true was requested but the window could not be brought to the foreground (Windows foreground lock); the capture may show overlapping content."
+        $reason = if ($activationError) { $activationError } else { 'Windows refused to bring the target window to the foreground.' }
+        $result["warning"] = "$reason OCR captured without activating the target. Check for overlapping content before using any coordinates."
       }
       return $result
     }
@@ -3635,6 +5095,11 @@ function Invoke-Action {
     default {
       return $null
     }
+  }
+  } finally {
+    # A step that failed between Start-Input and Complete-Input still replays.
+    if ($script:WcuHolding) { [void](Stop-InputHold) }
+    Exit-DesktopInput $inputLease
   }
 }
 
@@ -3662,6 +5127,8 @@ try {
 Write-BackendStage 'backend-ready'
 
 if ($Persistent) {
+  [Console]::Out.WriteLine((@{type='ready';protocol=1;pid=$PID}|ConvertTo-Json -Compress))
+  [Console]::Out.Flush()
   # Persistent mode: one JSON request per stdin line, one JSON response per
   # stdout line. Stays alive between actions so repeated calls skip process
   # startup, assembly loading and native-DLL resolution entirely.
@@ -3669,7 +5136,12 @@ if ($Persistent) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $req = $null
     Write-BackendStage 'request-parse-start'
-    try { $req = $line | ConvertFrom-Json } catch { continue }
+    try { $req = $line | ConvertFrom-Json } catch {
+      [Console]::Error.WriteLine('WCU_BACKEND_PROTOCOL_ERROR: request was not valid JSON')
+      [Console]::Out.WriteLine('{"id":null,"ok":false,"error":"WCU_BACKEND_PROTOCOL_ERROR: request was not valid JSON"}')
+      [Console]::Out.Flush()
+      continue
+    }
     Write-BackendStage 'request-parse-complete'
     $id = Get-Prop $req "id" 0
     $name = [string](Get-Prop $req "action" "")
@@ -3677,6 +5149,8 @@ if ($Persistent) {
     try {
       $result = Invoke-Action -Action $name -InputObject (Get-Prop $req "args" $null)
       if ($null -eq $result) { throw "Unknown action '$name'." }
+      $notice = [WcuInputHold]::TakeNotice()
+      if ($notice -and $result -is [System.Collections.IDictionary]) { $result['userInputNotice'] = $notice }
     } catch {
       $result = [ordered]@{
         ok = $false

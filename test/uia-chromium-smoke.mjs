@@ -14,10 +14,10 @@ let ready,buffer='',stderr='',pongs=[];
 fixture.stderr.on('data',b=>stderr+=b);
 fixture.stdout.on('data',b=>{buffer+=b;let e;while((e=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,e);buffer=buffer.slice(e+1);try{const r=JSON.parse(line);if(r.ready)ready=r;if(r.pong)pongs.push(r.pong);}catch{}}});
 const clients=[],results=[];
-async function makeClient(root,powershell,label){
+async function makeClient(root,powershell,label,overrides={}){
   const temp=path.join(artifacts,label+'-'+path.basename(powershell).replaceAll('.','-'));
   await mkdir(temp,{recursive:true});
-  const client=new McpTestClient(process.execPath,[path.join(root,'mcp/server.mjs')],{env:{...env,TEMP:temp,TMP:temp,WINDOWS_CU_POWERSHELL:powershell}});
+  const client=new McpTestClient(process.execPath,[path.join(root,'mcp/server.mjs')],{env:{...env,TEMP:temp,TMP:temp,WINDOWS_CU_POWERSHELL:powershell,...overrides}});
   clients.push(client);await client.init();return client;
 }
 async function call(client,action,args){
@@ -53,6 +53,24 @@ try{
     const names=node=>node?[node.name,...(node.children||[]).flatMap(names)]:[];
     const defaults=await call(client,'accessibility_tree',{nativeWindowHandle:ready.hwnd});
     assert.equal(defaults.webContent?.state,'ready');assert.ok(names(defaults.tree).includes('Fixture action'),'Default depth misses the page');
+    assert.ok(Number.isInteger(defaults.countedDepth) && defaults.countedDepth <= 6, 'Counted depth follows maxDepth');
+    assert.ok(Number.isInteger(defaults.structuralDepth) && defaults.structuralDepth > defaults.countedDepth, 'Chromium layout panes increase structural depth');
+    const brokenLane=await makeClient(path.join(import.meta.dirname,'..'),powershell,'failed-agent',{
+      WCU_BROWSER_LANE:'on',WCU_BROWSER_APP:'edge',WCU_BROWSER_EXE:process.execPath,
+      WCU_BROWSER_PROFILE:path.join(artifacts,'failed-agent-profile'),WCU_BROWSER_SIGNIN:'0',
+      WCU_BROWSER_ATTACH_USER:'0',WCU_BROWSER_CDP_URL:'',WCU_BROWSER_BIDI_URL:'',
+    });
+    const launch=await brokenLane.call('windows_computer_use_set_value',{elementId:'new-tab',value:'https://example.test'});
+    assert.equal(launch.isError,true);assert.match(launch.content[0].text,/BROWSER_LANE_UNAVAILABLE/);
+    // The fixture is shown (inactive). Hidden windows stay out of the list: on
+    // a busy desktop they alone can fill the 200 entries before the fixture.
+    const fallbackWindows=await call(brokenLane,'list_windows',{maxWindows:200});
+    assert.equal(fallbackWindows.browserLane.agent.state,'failed');
+    const fallbackWindow=fallbackWindows.windows.find(window=>window.nativeWindowHandle===ready.hwnd);
+    assert.ok(fallbackWindow,'The existing fixture is still discoverable');
+    const desktopFallback=await call(brokenLane,'snapshot',{nativeWindowHandle:fallbackWindow.nativeWindowHandle,browserTab:'desktop',includeScreenshot:false});
+    assert.equal(desktopFallback.source,'uia');
+    assert.ok(names(desktopFallback.tree).includes('Fixture action'),'Desktop fallback did not read the original window');
     for(const viewMode of ['control','raw','content']){
       const r=await call(client,'accessibility_tree',{...target,viewMode,detailLevel:'full',maxDepth:12,maxNodes:300});
       assert.ok(r.nodeCount>10);assert.equal(r.targetResponsive,true);assert.ok(!r.providerError,r.providerError);
@@ -67,6 +85,8 @@ try{
     assert.equal(bounded.nodeCount,3);assert.equal(bounded.truncationReason,'maxNodes');
     const snap=await call(client,'snapshot',{...target,includeScreenshot:false,maxNodes:30,maxDepth:6});
     assert.equal(snap.targetResponsive,true);
+    assert.ok(Number.isInteger(snap.countedDepth) && snap.countedDepth <= 6);
+    assert.ok(Number.isInteger(snap.structuralDepth) && snap.structuralDepth >= snap.countedDepth);
     const budget=await call(client,'accessibility_tree',{...target,maxNodes:3000,maxDepth:12,treeTimeoutMs:100});
     assert.equal(budget.truncationReason,'timeBudget');assert.equal(budget.targetResponsive,true);
     const expected=pongs.length+1;

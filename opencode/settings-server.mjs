@@ -7,8 +7,9 @@ const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/settings.js', ['settings.js', 'text/javascript; charset=utf-8']],
 ]);
-export async function createSettingsServer({ store, onChange, getStatus, onLocale, assetRoot = new URL('../dist/', import.meta.url) }) {
+export async function createSettingsServer({ store, onChange, getStatus, onLocale, onApproval, onHyperv, onDiagnostics, onUpdate, assetRoot = new URL('../dist/', import.meta.url) }) {
   const token = randomBytes(32).toString('hex');
+  let hypervBusy = false;
   const server = http.createServer(async (req, res) => {
     const respond = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
     try {
@@ -28,6 +29,26 @@ export async function createSettingsServer({ store, onChange, getStatus, onLocal
       if (supplied.length !== token.length || !timingSafeEqual(Buffer.from(token), supplied)) return respond(401, { error: 'Open settings from the Computer Use command' });
       if (pathname === '/api/settings' && req.method === 'GET') return respond(200, { ...await store.snapshot(), status: getStatus() });
       if (pathname === '/api/status' && req.method === 'GET') return respond(200, getStatus());
+      if (pathname === '/api/update' && req.method === 'GET' && onUpdate) return respond(200, await onUpdate());
+      if (['/api/approval','/api/hyperv','/api/diagnostics'].includes(pathname) && req.method === 'POST') {
+        if (!req.headers['content-type']?.startsWith('application/json')) return respond(415, { error: 'JSON required' });
+        let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 1024) return respond(413, { error: 'Request too large' }); }
+        const input = JSON.parse(body);
+        if (pathname === '/api/approval' && onApproval) {
+          if (typeof input.id !== 'string' || typeof input.allow !== 'boolean') throw Error('Invalid approval decision');
+          await onApproval(input.id,input.allow); return respond(200,{ok:true});
+        }
+        if (pathname === '/api/hyperv' && onHyperv) {
+          if (hypervBusy) return respond(409,{error:'Connection setup is already running'});
+          hypervBusy = true;
+          try { return respond(200,await onHyperv()); } finally { hypervBusy = false; }
+        }
+        if (pathname === '/api/diagnostics' && onDiagnostics) {
+          const contents = await onDiagnostics();
+          res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Content-Disposition':'attachment; filename="opencode-computer-use-diagnostics.txt"','Cache-Control':'no-store'});
+          return res.end(contents);
+        }
+      }
       if (pathname === '/api/locale' && req.method === 'POST' && onLocale) {
         if (!req.headers['content-type']?.startsWith('application/json')) return respond(415, { error: 'JSON required' });
         let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 128) return respond(413, { error: 'Request too large' }); }

@@ -13,9 +13,14 @@ const pause = ms => new Promise(r=>setTimeout(r,ms));
 async function until(fn, timeout=60000) { const start=Date.now(); let error; while(Date.now()-start<timeout){ try{const value=await fn();if(value)return value;}catch(e){error=e;} await pause(100); } throw error??Error('Timed out waiting'); }
 const freePort = async()=>{const s=net.createServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const port=s.address().port;await new Promise(r=>s.close(r));return port;};
 
-test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and cancels work', {skip:!executable,timeout:180000}, async t=>{
+test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and cancels work', {skip:!executable,timeout:240000}, async t=>{
   const home=await mkdtemp(path.join(os.tmpdir(),'opencode-host-test-'));
   const project=path.join(home,'project'), data=path.join(home,'cu');await mkdir(project);
+  const npmConfig=path.join(home,'public.npmrc');await writeFile(npmConfig,'registry=https://registry.npmjs.org\n');
+  for(const dir of [path.join(home,'config','opencode'),path.join(home,'config-dir')]){
+    await mkdir(dir,{recursive:true});await writeFile(path.join(dir,'.npmrc'),'registry=https://registry.npmjs.org\n');
+  }
+  const localPage=path.join(home,'owned.html');await writeFile(localPage,'<!doctype html><title>Owned local approval fixture</title><h1>Approved local file</h1>');
   const captured=[];
   const model=http.createServer(async(req,res)=>{
     if(req.url==='/fixture'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end('<!doctype html><html><title>Owned OpenCode fixture</title><body><h1>Computer Use image fixture</h1><p>This page belongs to the isolated test.</p></body></html>');return;}
@@ -28,6 +33,7 @@ test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and
     let action='wait',args={milliseconds:1};
     if(content.includes('__LONG__'))args={milliseconds:10000};
     if(content.includes('__ENABLE__')){action='tools';args={operation:'enable',names:['wait']};}
+    if(content.includes('__LOCAL_FILE__')){action='set_value';args={elementId:'new-tab',value:pathToFileURL(localPage).href};}
     let answer=!body.tools?.length?'Summary':already?'Completed':undefined;
     if(browserTask&&body.tools?.length){
       if(screenshotCalled)answer='Completed';
@@ -50,7 +56,7 @@ test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and
   await new Promise(r=>model.listen(0,'127.0.0.1',r));
   const root=fileURLToPath(new URL('../',import.meta.url));
   const cfg = {
-    plugin: [[pathToFileURL(path.join(root,'opencode/plugin.mjs')).href, {home:data,locale:'zh',environment:{NODE_ENV:'test',WCU_TEST_NO_TAKEOVER:'1',WCU_BROWSER_HEADLESS:'1',WCU_BROWSER_APP:'edge'}}]],
+    plugin: [[process.env.OPENCODE_TEST_PLUGIN_SPEC || pathToFileURL(path.join(root,'opencode/plugin.mjs')).href, {home:data,locale:'zh',openApprovalPage:false,environment:{NODE_ENV:'test',WCU_TEST_NO_TAKEOVER:'1',WCU_BROWSER_HEADLESS:'1',WCU_BROWSER_APP:'edge'}}]],
     model:'mock/test', small_model:'mock/test', permission:{'*':'allow'},
     provider: { mock: {
       npm:'@ai-sdk/openai-compatible', name:'Mock',
@@ -60,7 +66,7 @@ test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and
   };
   await writeFile(path.join(project,'opencode.json'),JSON.stringify(cfg));
   const port=await freePort(),base=`http://127.0.0.1:${port}`;
-  const host=spawn(executable,['serve','--hostname','127.0.0.1','--port',String(port)],{cwd:project,windowsHide:true,env:{...process.env,XDG_CONFIG_HOME:path.join(home,'config'),XDG_DATA_HOME:path.join(home,'data'),XDG_CACHE_HOME:path.join(home,'cache'),XDG_STATE_HOME:path.join(home,'state'),OPENCODE_CONFIG_DIR:path.join(home,'config-dir'),OPENCODE_DISABLE_DEFAULT_PLUGINS:'1',OPENCODE_SERVER_PASSWORD:'',OPENCODE_SERVER_USERNAME:'',OPENCODE_CONFIG: path.join(project,'opencode.json')}});
+  const host=spawn(executable,['serve','--hostname','127.0.0.1','--port',String(port)],{cwd:project,windowsHide:true,env:{...process.env,NPM_CONFIG_USERCONFIG:npmConfig,npm_config_registry:'https://registry.npmjs.org',NPM_CONFIG_REGISTRY:'https://registry.npmjs.org',OPENCODE_DISABLE_MODELS_FETCH:'1',OPENCODE_DISABLE_AUTOUPDATE:'1',XDG_CONFIG_HOME:path.join(home,'config'),XDG_DATA_HOME:path.join(home,'data'),XDG_CACHE_HOME:path.join(home,'cache'),XDG_STATE_HOME:path.join(home,'state'),OPENCODE_CONFIG_DIR:path.join(home,'config-dir'),OPENCODE_DISABLE_DEFAULT_PLUGINS:'1',OPENCODE_SERVER_PASSWORD:'',OPENCODE_SERVER_USERNAME:'',OPENCODE_CONFIG: path.join(project,'opencode.json')}});
   let output='';host.stdout.on('data',b=>output+=b);host.stderr.on('data',b=>output+=b);
   t.after(async()=>{
     if(process.platform==='win32'&&host.exitCode===null)await new Promise(r=>execFile('taskkill.exe',['/PID',String(host.pid),'/T','/F'],{windowsHide:true},()=>r()));
@@ -68,7 +74,7 @@ test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and
     model.closeAllConnections();await new Promise(r=>model.close(r));
     await rm(home,{recursive:true,force:true,maxRetries:5,retryDelay:200});
   });
-  const api=async(url,body)=>{const response=await fetch(base+url+(url.includes('?')?'&':'?')+'directory='+encodeURIComponent(project),{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(60000)});const text=await response.text();if(!response.ok)throw Error(response.status+': '+text.slice(0,1500));return JSON.parse(text);};
+  const api=async(url,body)=>{const response=await fetch(base+url+(url.includes('?')?'&':'?')+'directory='+encodeURIComponent(project),{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(url==='/mcp'?120000:60000)});const text=await response.text();if(!response.ok)throw Error(response.status+': '+text.slice(0,1500));return JSON.parse(text);};
   try{
     await until(()=>fetch(base+'/global/health',{signal:AbortSignal.timeout(2000)}).then(r=>r.ok),60000);
     console.log('Host health ready');
@@ -84,6 +90,23 @@ test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and
     const instances=await readdir(path.join(data,'instances'));const instance=JSON.parse(await readFile(path.join(data,'instances',instances[0])));
     const settingsURL=new URL(instance.url),headers={Authorization:'Bearer '+settingsURL.hash.slice(1),'Content-Type':'application/json'};
     const settings=async()=>fetch(settingsURL.origin+'/api/settings',{headers}).then(r=>r.json());
+    const diagnostic=await fetch(settingsURL.origin+'/api/diagnostics',{method:'POST',headers,body:'{}'});
+    assert.equal(diagnostic.status,200);const diagnosticText=await diagnostic.text();
+    assert.match(diagnosticText,/OpenCode/);assert.doesNotMatch(diagnosticText,/__WAIT__|__LOCAL_FILE__|__opencodeComputerUse|WCU_OPENCODE_TOKEN/);
+    for(const allow of [false,true]){
+      const sensitive=await api('/session',{});
+      const requesting=api('/session/'+sensitive.id+'/message',{parts:[{type:'text',text:'__LOCAL_FILE__'}],model:{providerID:'mock',modelID:'test'}});
+      const approval=await until(async()=>{const state=await settings();return state.status.approvals?.find(item=>item.sessionID===sensitive.id);});
+      const decided=await fetch(settingsURL.origin+'/api/approval',{method:'POST',headers,body:JSON.stringify({id:approval.id,allow})});assert.equal(decided.status,200);
+      await requesting;
+      const sensitiveMessages=await api('/session/'+sensitive.id+'/message');
+      const sensitiveTool=sensitiveMessages.flatMap(m=>m.parts).find(p=>p.type==='tool');
+      assert.ok(sensitiveTool);
+      assert.equal(sensitiveTool.state.input._wcuApproval,undefined);
+      assert.equal(sensitiveTool.state.input.__opencodeComputerUse,undefined);
+      if(allow)assert.doesNotMatch(JSON.stringify(sensitiveTool.state),/WCU_APPROVAL_REQUIRED|WCU_POLICY_DENIED|invalid.*grant/i);
+      else assert.match(JSON.stringify(sensitiveTool.state),/WCU_APPROVAL_DENIED/);
+    }
     const saved=await settings();
     const changed=await fetch(settingsURL.origin+'/api/settings',{method:'PATCH',headers,body:JSON.stringify({revision:saved.revision,patch:{toolPreset:'lazy'}})});assert.equal(changed.status,200);
     await until(async()=>{const s=await settings();if(s.status.reloadError)throw Error(s.status.reloadError);return !s.status.reloadPending;});
@@ -116,6 +139,10 @@ test('real OpenCode V1 loads plugin, calls managed MCP, refreshes lazy tools and
     assert.ok(summaryRequest,'The optional progress summary uses the active model');
     assert.equal(summaryRequest.tools?.length??0,0,'The progress model must have no callable tools');
     assert.ok(!JSON.stringify(summaryRequest.messages).includes('__WAIT__'),'The summary must not include the original user prompt');
-    console.log('Real OpenCode: managed MCP, signed calls, lazy refresh, cross-session exclusion, cancellation, recovery, browser images and isolated AI summaries passed');
-  }catch(error){throw Error(error.message+'\nHost diagnostics:\n'+output.slice(-14000));}
+    console.log('Real OpenCode: managed MCP, signed calls, sensitive approval allow/deny, diagnostics, lazy refresh, cross-session exclusion, cancellation, recovery, browser images and isolated AI summaries passed');
+  }catch(error){
+    const logs=path.join(home,'data','opencode','log');
+    for(const file of await readdir(logs).catch(()=>[])) if(file.endsWith('.log')) output+='\n'+(await readFile(path.join(logs,file),'utf8')).slice(-10000);
+    throw Error(error.message+'\nHost diagnostics:\n'+output.slice(-18000));
+  }
 });

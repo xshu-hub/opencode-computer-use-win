@@ -8,9 +8,11 @@ Gecko desktop trees now apply the same depth accounting to unnamed Gecko layout 
 
 ## Launch an application
 
-`windows_computer_use_launch_app` accepts `target` (absolute `.exe`/`.com`/`.lnk`, executable name from PATH/App Paths, exact installed application name or AppUserModelID), optional `arguments`, `workingDirectory`, `activate` and `waitMs` (0–10000, default 1500). Arguments are a Windows command-line string passed directly to the target, not interpreted by a command shell. Command interpreters and script hosts (cmd, PowerShell, pwsh, Windows Terminal, WSL, bash, conhost, wscript, cscript, mshta, rundll32, regsvr32, msiexec, forfiles, schtasks), and shortcuts that start one, take no arguments: such a call fails with `LAUNCH_COMMAND_REFUSED` before anything starts, so launch_app is never a command channel the user cannot see. Installed-app identifiers do not accept arguments or a working directory. URLs and scripts are not launch targets.
+`windows_computer_use_launch_app` accepts `target` (absolute `.exe`/`.com`/`.lnk`, executable name from PATH/App Paths, exact installed application name or AppUserModelID), optional `arguments`, `workingDirectory`, `activate`, `desktop` and `waitMs` (0–10000, default 1500). Arguments are a Windows command-line string passed directly to the target, not interpreted by a command shell. Command interpreters and script hosts (cmd, PowerShell, pwsh, Windows Terminal, WSL, bash, conhost, wscript, cscript, mshta, rundll32, regsvr32, msiexec, forfiles, schtasks), and shortcuts that start one, take no arguments: such a call fails with `LAUNCH_COMMAND_REFUSED` before anything starts, so launch_app is never a command channel the user cannot see. Installed-app identifiers do not accept arguments or a working directory. URLs and scripts are not launch targets.
 
-The interactive Explorer desktop starts the application with its environment and lifetime. This keeps it alive when the calling tool's kill-on-close Job or MCP server ends; it does not request elevation or change Job limits. An absent Explorer desktop returns an explicit error. `activate:false` requests a nonactivating show and takes a quiet lease, but an application can activate itself. `activate:true` brings the app forward, so it shows the takeover indicator and arms Esc, as activate_window does.
+`desktop` chooses where the app opens. `background` is DSH's hidden desktop in the same Windows session (CreateDesktop): the app keeps the user's account, files, installed apps and DSH's environment but never shows on the user's screen, and its windows take UI Automation and window-message actions only; the result says `desktop:"background"`, and `list_windows` marks those windows the same way. It starts executables only, inside the desktop's job, so the apps end when DSH quits or the virtual machine work mode is chosen. `current` is the user's desktop. Without `desktop`, the Low disruption work mode opens an executable on the hidden desktop and anything else (a shortcut, an installed or Store app) on the user's desktop, where an app that comes forward by itself does not get the user's typing; Foreground, and a server started without DSH settings, open everything on the user's desktop. Calls that name a hidden window (by `nativeWindowHandle`, `processId` or title) go to a second backend on the hidden desktop; real pointer or keyboard input to such a window fails with `WCU_BACKGROUND_DESKTOP_LIMIT`, which says to open the app again with `desktop:"current"`. Without a window target, a call follows the hidden window the series last worked in.
+
+On the user's desktop, the interactive Explorer desktop starts the application with its environment and lifetime. This keeps it alive when the calling tool's kill-on-close Job or MCP server ends; it does not request elevation or change Job limits. An absent Explorer desktop returns an explicit error. `activate:false` requests a nonactivating show and takes a quiet lease, but an application can activate itself. `activate:true` brings the app forward, so it shows the takeover indicator and arms Esc, as activate_window does.
 
 Success is `verification:"dispatched"`, not proof that a window appeared. `observedNewWindows` lists newly observed windows, which may include unrelated applications; identify the intended window with `list_windows` or `wait_for`. Single-instance applications can reuse an existing window. Cancellation after dispatch does not undo launch; observe before retrying.
 
@@ -38,7 +40,11 @@ Each action uses the least intrusive way that works. Reads (snapshot, accessibil
 
 Real input (coordinate clicks, pastes, key presses, drags, wheel scrolls) borrows the foreground: the target comes forward for the action, a coordinate click is refused with POINT_COVERED when its point shows a window of another process, and afterwards the pointer goes back where the user left it and the foreground goes back to the window that was in front. The target stays in front while a menu, list or dialog the action opened is showing, with activate:true, and when the user switched windows meanwhile; a pointer the user moved is left where they put it. Keys are sent only after a last check that the target (or a window of its process) is still in front. Bringing a window forward first joins the input of the thread in front, which needs no key press, and falls back to the Alt-key method.
 
-Without a window target, the active window is the window the operation series last gave input to, while it is open, else the foreground window. Input and observations without a target use it, so after the foreground went back to the user they keep to DSH's window; snapshot captures that window when it is behind another one. health.activeWindow still reports the real foreground window.
+The user's work mode adjusts this on the user's desktop. Low disruption (the default) never keeps a window in front: `activate` is ignored except by activate_window. Real input does not wait for the user to stop: while it runs, the user's own keys and mouse actions are held and then replayed to their window (the result says so in `userInput`), and while a window DSH worked in stays in front, the user's next key gives the foreground back to their window first (`userInputNotice` on the next result says so). It waits only while the user holds a key or mouse button (`WCU_USER_INPUT_HELD` after 10 seconds, nothing sent), has input-method text not yet committed (up to 5 seconds), or has a full-screen app or presentation in front (`WCU_USER_FULLSCREEN` after 20 seconds, nothing sent); a wait longer than half a second is reported as `waitedForUserMs`. Foreground keeps the window at the front for every input action (`activate:true`), with no wait. A server started without DSH settings keeps the behaviour described above. health reports the mode as `workMode` (`quiet`, `fast` or `direct`).
+
+Without a window target, the active window is the window the operation series last gave input to, while it is open, else the foreground window. Background element actions count too: after set_value, invoke, a pattern click or an element scroll, that element's window is the one a following targetless keypress or type_text goes to. Input and observations without a target use it, so after the foreground went back to the user they keep to DSH's window; snapshot captures that window when it is behind another one. health.activeWindow still reports the real foreground window.
+
+keypress and type_text report `deliveredTo`: the window that got the input (`nativeWindowHandle`, `processId`, `title`), `via` (how it was chosen: `window target`, `last DSH window` or `front window`) and, when that window was in front and answered messages, `focus`, the control with the keyboard focus, such as `Edit 'Address and search bar'`. With `via: front window` (no window target, and DSH had not worked in a window this turn) the result's verification is `unconfirmed`.
 
 Reads, list_windows, wait, background dispatch and element actions that start in the background take a quiet lease: they honour a stopped series but show no indicator and arm no global Esc. An element action (invoke, set_value, scroll on an element) or type_text in auto mode that turns out to need real input fails in the background attempt with WCU_NEEDS_INPUT before anything is sent, and the server runs it again with the indicator and Esc. Text DSH pastes carries the clipboard formats that keep it out of clipboard history and the cloud clipboard, and the previous clipboard is restored.
 
@@ -72,8 +78,9 @@ Capture a screenshot and a UI Automation tree for the active window or desktop. 
 | activate | boolean | default: false |
 | viewMode | string | control/content/raw; default: "control" |
 | includeOffscreen | boolean | default: false |
-| detailLevel | string | compact/full; default: "compact" |
+| detailLevel | string | summary/compact/full; default: "compact"; summary keeps id, control type, name and states (disabled, focused, offscreen) |
 | treeTimeoutMs | integer | default: 5000; min: 100; max: 30000 |
+| maxBytes | integer | min: 2000; max: 2000000; byte budget for the result, see below |
 | includeScreenshot | boolean | default: true |
 | captureWindow | boolean | default: false |
 | maxWidth | integer | default: 1600; min: 0; max: 7680 |
@@ -93,23 +100,31 @@ Read the UI Automation tree without taking a screenshot. In a Chromium-based win
 | activate | boolean | default: false |
 | viewMode | string | control/content/raw; default: "control" |
 | includeOffscreen | boolean | default: false |
-| detailLevel | string | compact/full; default: "compact" |
+| detailLevel | string | summary/compact/full; default: "compact"; summary keeps id, control type, name and states (disabled, focused, offscreen) |
 | treeTimeoutMs | integer | default: 5000; min: 100; max: 30000 |
+| maxBytes | integer | min: 2000; max: 2000000; byte budget for the result, see below |
+| treeDeltaBase | string | `start` or a treeId; see below |
 | maxDepth | integer | default: 6; min: 0; max: 12 |
 | maxNodes | integer | default: 500; min: 1; max: 3000 |
 
+Cheaper reads ([#97](https://github.com/Yu-tao-Li/dsh-computer-use-win/issues/97), all opt-in): `detailLevel: "summary"` drops boxes, classes and process details. `maxBytes` is a budget for the result's UTF-8 JSON, unlike `maxNodes`, which counts nodes: over it the tree becomes a summary, then keeps only actionable controls (buttons, menu items, links, edits, check boxes, list and tree items and the like) with their ancestors, and only then is cut breadth-first, with the whole result saved to the file named by `budget.fullResultPath` (kept 30 minutes); `budget.steps` lists what was done. `treeDeltaBase` re-reads one window cheaply: `start` returns the tree and a `treeId`; that id on a later read of the same window, with the same view, detail level and depth, returns `delta` (`added` nodes, `removed` ids, `changed` fields, `unchanged` count) and a new `treeId` instead of the tree. A forgotten base, another window or view, a truncated tree, or changes to more than 40 % of the nodes return the whole tree with `delta.fallback` (`baseUnknown`, `targetChanged`, `truncated`, `mostlyChanged`). Element ids are runtime ids, so a re-created control shows as removed and added. To check one control, find or wait_for is cheaper still.
+
+If a delta exceeds `maxBytes`, `delta.fallback: "maxBytes"` accompanies a tree reduced to fit the budget. A tree reduced by the budget is an incomplete baseline. A later delta based on it falls back with `truncated`. If a single node or the remaining OCR metadata still cannot fit, `budget.steps` includes `fileOnly` and `budget.fullResultPath` points to the complete result.
+
+Windows UI Automation results from `accessibility_tree` and `snapshot` include two top-level depths. `countedDepth` is the greatest depth charged against `maxDepth`. `structuralDepth` is the greatest actual level, as in each node's `depth` field, with the root at 0. The two values match in desktop scope. Both are 0 when the backend returns only the root or no tree. They describe the tree returned by the backend before `summary`, `maxBytes` or delta shaping and remain available even when the response carries only the complete result's file path. Browser outlines do not carry these fields.
+
 ### list_windows
 
-List top-level windows visible to Windows UI Automation.
+List top-level windows visible to Windows UI Automation, in Z order. Minimized windows are listed too, with `minimized: true` and `isOffscreen: true` and without a bounding box (Windows parks them at -32000,-32000); activate_window, or any input with that window as target, restores them. When more windows exist than `maxWindows`, the result has `truncated: true`. Windows on DSH's hidden desktop (see Launch an application) follow the user's, marked `desktop: "background"`, with a one-line `hiddenDesktop` note.
 
 | Argument | Type | Default / bounds |
 |---|---|---|
-| includeInvisible | boolean | default: false |
+| includeInvisible | boolean | default: false; also lists hidden windows (tray, helper windows) |
 | maxWindows | integer | default: 50; min: 1; max: 200 |
 
 ### find
 
-Find UIA elements by name, automation id, class, value or type. When UIA is sparse or incomplete and no match is found, automatically read visible text with OCR. OCR candidates have SCREEN coordinates and source:'ocr', not UIA element ids. If the literal query misses, inspect ocr.lines and reformulate using the visible text (a search box may say '大家都在搜').
+Find UIA elements by name, automation id, class, value or type. When UIA is sparse or incomplete and no match is found, the default OCR fallback reads visible text. If a controlType was requested, ocrSkipped:'controlType' explains why the search kept the UIA type filter. OCR candidates have SCREEN coordinates and source:'ocr', not UIA element ids. If the literal query misses, inspect ocr.lines and reformulate using the visible text (a search box may say '大家都在搜').
 
 | Argument | Type | Default / bounds |
 |---|---|---|
@@ -123,7 +138,7 @@ Find UIA elements by name, automation id, class, value or type. When UIA is spar
 | includeOffscreen | boolean | default: false |
 | treeTimeoutMs | integer | default: 5000; min: 100; max: 30000 |
 | controlType | string |  |
-| ocrFallback | boolean | default: true |
+| ocrFallback | boolean | default: true; only runs without controlType |
 | maxDepth | integer | default: 8; min: 0; max: 12 |
 | maxNodes | integer | default: 1200; min: 1; max: 5000 |
 | maxResults | integer | default: 25; min: 1; max: 200 |
@@ -230,7 +245,9 @@ Scroll at a screen coordinate or an element. An element scrolls in the backgroun
 
 ### type_text
 
-Type text into the focused control of the target (or active) window. method:'auto' (default) = a focused Win32 edit takes the text in the background (EM_REPLACESEL at the caret: no clipboard, keyboard or foreground; text with line breaks is pasted instead); any other control gets a clipboard paste with the window borrowed for it (reliable for CJK; the clipboard is restored and the paste kept out of clipboard history); method:'clipboard' always pastes; method:'sendinput' sends each character as a KEYEVENTF_UNICODE SendInput event (no clipboard, best for ASCII/short text); method:'background' posts WM_CHAR to the control with the keyboard focus in the target window — no clipboard, no foreground steal; checked on Win32 edits, unverified elsewhere, refused when nothing in the window has the focus. After a background write, or with a window target and focusMode:'main', the result includes verifyValue (the text control's value after typing, truncated to 200 chars).
+Type text into the focused control of the target (or active) window. method:'auto' (default) types into a focused Win32 edit in the background using EM_REPLACESEL. Other controls and text with line breaks use clipboard paste. method:'clipboard' always pastes. method:'background' posts WM_CHAR to the focused control of the specified window. Background typing does not borrow the foreground. Some methods can include verifyValue, truncated to 200 characters.
+
+method:'sendinput' queues Unicode keystrokes without using the clipboard. The target stays in front until its window has taken the keys, so a slow app gets the time it needs. For a plain Win32 edit it also checks the value before returning the foreground. A confirmed edit reports verification:'observed'; if the application added text or changed letter case (autocomplete, for example), a note says so. Password fields and other controls without safe readback report verification:'unconfirmed'. If a readable edit stops changing without the complete text, the call reports INPUT_TEXT_INCOMPLETE. Inspect the field before retrying because a prefix may already have been entered.
 
 | Argument | Type | Default / bounds |
 |---|---|---|
@@ -245,7 +262,7 @@ Type text into the focused control of the target (or active) window. method:'aut
 
 ### keypress
 
-Press a key or key chord, such as Ctrl+L, Enter, Alt+F4, or Shift+Tab. The Windows key is blocked by design. The keys go to the target (or active) window, which comes forward for them and then gives the foreground back, unless a menu or dialog they opened is showing. dispatch:'background' supports only a single printable character (posted as WM_CHAR to the focused control of the target window, no foreground steal); chords and functional keys must use dispatch:'foreground' (SendKeys).
+Press a key or key chord, such as Ctrl+L, Enter, Alt+F4, or Shift+Tab. The Windows key is blocked by design. The keys go to the target window, else the window DSH last worked in this turn, else the window in front; it comes forward for them and then gives the foreground back, unless a menu or dialog they opened is showing. The result's `deliveredTo` names the window and its focused control that received the keys (see "Foreground, pointer and the takeover indicator"). dispatch:'background' supports only a single printable character (posted as WM_CHAR to the focused control of the target window, no foreground steal); chords and functional keys must use dispatch:'foreground' (SendInput).
 
 | Argument | Type | Default / bounds |
 |---|---|---|
@@ -254,7 +271,19 @@ Press a key or key chord, such as Ctrl+L, Enter, Alt+F4, or Shift+Tab. The Windo
 | nativeWindowHandle | integer | min: 1 |
 | activate | boolean | default: false |
 | keys | array | min items: 1; required |
+| thenKeys | array of chords | 1–19 following chords; desktop foreground only |
+| intervalMs | integer | 0–500 ms between chords; default: 60 |
 | dispatch | string | foreground/background; default: "foreground" |
+
+For Excel Ribbon commands, keep the chord sequence in one foreground lease:
+`{"keys":["alt","h"],"thenKeys":[["o"],["w"]]}` opens Column Width.
+Send a value such as the width in a separate call after the dialog is observed: if a key tip does not engage, later keys land in the active cell.
+Each chord still checks cancellation and the target foreground. A failed chord stops the sequence and restores the borrowed foreground; sent chords are not replayed.
+
+For spreadsheet layout, select the range with Ctrl+G and the observed Go To dialog.
+Use numeric column widths or AutoFit, set long-text columns to a bounded width,
+enable Wrap Text in Format Cells > Alignment, then AutoFit Row Height.
+Inspect the saved workbook rather than relying on a drag being dispatched.
 
 ### focus
 
@@ -288,7 +317,7 @@ Invoke a UI Automation element in the background: BM_CLICK on a Win32 button, el
 
 ### set_value
 
-Set a value in the background (EM_REPLACESEL on a Win32 edit, else the UI Automation ValuePattern), or focus and type as fallback.
+Set a value in the background (EM_REPLACESEL on a Win32 edit, else the UI Automation ValuePattern), or focus and type as fallback. Whether the keyboard focus moves to the element depends on the app: Chromium moves it (measured on the Chrome address bar and a page field), a Win32 edit keeps it where it was. When a key must follow in that field, such as Enter in a search box, call focus on the element first; a targetless keypress afterwards goes to this element's window.
 
 | Argument | Type | Default / bounds |
 |---|---|---|
@@ -305,7 +334,7 @@ Set a value in the background (EM_REPLACESEL on a Win32 edit, else the UI Automa
 
 ### activate_window
 
-Bring a top-level window to the foreground by title substring, process id, or native HWND. This tool always activates its target; the shared activate flag cannot suppress it.
+Bring a top-level window to the foreground by title substring, process id, or native HWND. A minimized window is restored first; the result then says `restored: true`, and `window` describes the window after the call, not the -32000,-32000 position it had while minimized. If Windows leaves it minimized, `activated` is false and a warning says so. This tool always activates its target; the shared activate flag cannot suppress it.
 
 | Argument | Type | Default / bounds |
 |---|---|---|
@@ -324,7 +353,7 @@ Wait for a short period before observing the UI again.
 
 ### ocr
 
-Read visible text with Windows.Media.Ocr, independent of UIA by default. Returns text, lines and word boxes in SCREEN coordinates. Best effort: small or faint text can still be misread and there is no confidence score, so prefer UIA names and values when the app exposes them. query is literal text matching, not semantic recognition; inspect lines if 'search' misses a placeholder. Click matched.word.x/y using foreground dispatch, then type_text with focusMode:'preserve'. Optional resolveControl performs a potentially blocking UIA hit-test; its control may be the whole page rather than the text input.
+Read visible text with Windows.Media.Ocr, independent of UIA by default. Returns text, lines and word boxes in SCREEN coordinates. With query, only the lines with a match come back (lineCount counts all lines); without a match, every line's text and box but no word boxes. Best effort: small or faint text can still be misread and there is no confidence score, so prefer UIA names and values when the app exposes them. query is literal text matching, not semantic recognition; inspect lines if 'search' misses a placeholder. Click matched.word.x/y using foreground dispatch, then type_text with focusMode:'preserve'. Optional resolveControl performs a potentially blocking UIA hit-test; its control may be the whole page rather than the text input.
 
 | Argument | Type | Default / bounds |
 |---|---|---|
@@ -337,13 +366,16 @@ Read visible text with Windows.Media.Ocr, independent of UIA by default. Returns
 | language | string | pattern: BCP 47 tag |
 | resolveControl | boolean | default: false |
 | includeScreenshot | boolean | default: false |
+| maxBytes | integer | min: 2000; max: 2000000; byte budget: over it the word boxes go first, then the joined `text` (the lines carry it), then lines from the end, with the whole result saved to `budget.fullResultPath` |
 | query | string |  |
 
 The capture is read at full size unless maxWidth shrinks it. Windows OCR misreads small text, so when the median word is under 30 px tall the image is read a second time enlarged toward 36 px, at most 3x (`ocrScale` in the result; word boxes stay in SCREEN coordinates). `language` picks an installed recognizer by tag or prefix (`zh-Hans` reads with zh-Hans-CN); without it the Windows user languages decide, and the result names the recognizer in `language`. Chinese and Japanese lines come back without spaces between characters; Latin words and digits keep theirs. Windows OCR gives no confidence score, so a misread cannot be detected here: when the app exposes the text through UIA (find or accessibility_tree names and values), that text is exact.
 
+Word boxes are most of a full result: a 1500 × 900 window of text reads as about 50,000 characters. A query asks for one piece of text, so its result keeps the matching lines with their word boxes and leaves out `text`; when nothing matches, `lines` holds every line's text and box to reformulate from. A minimized window has nothing to read (Windows draws only its title strip), so OCR of one fails and says to restore it with activate_window.
+
 ### screenshot
 
-Capture a window or desktop without querying UIA. Returns an image plus bounds and imageScale for mapping image pixels to SCREEN coordinates: screen = bounds origin + image / imageScale. Use when the accessibility provider is unavailable, or to locate icons visually. Capture does not prove an action succeeded; inspect the resulting state.
+Capture a window or desktop without querying UIA. Returns an image plus bounds and imageScale for mapping image pixels to SCREEN coordinates: screen = bounds origin + image / imageScale. Use when the accessibility provider is unavailable, or to locate icons visually. Capture does not prove an action succeeded; inspect the resulting state. A minimized window shows only its title strip; the result then says `minimized: true` with a warning (activate_window restores it).
 
 | Argument | Type | Default / bounds |
 |---|---|---|
@@ -409,7 +441,7 @@ Chromium pages (Chrome, Edge, Brave) can be read and operated over the Chrome De
 
 | Source | How it connects | What its tabs can see |
 |---|---|---|
-| agent | The first `set_value` on `new-tab` starts the browser chosen in settings (`browserApp`: by default the Windows default browser, and Chrome, then Edge, when that is neither) in a visible background-created window under `%LOCALAPPDATA%\dsh-computer-use-win\agent-browser`, with `--disable-sync`, `--disable-extensions` and `--mute-audio`, its frame tinted DSH blue (`--install-autogenerated-theme=65,118,230`); calls that arrive while it starts share that launch. The browser is a child of the server process and closes after 10 idle minutes. By default every launch gets a fresh profile `profile-<server pid>-*`; profiles of servers that are gone are removed at the next launch, while the profile of a live server, or one whose lockfile a browser still holds, is left alone. With `browserSignIn` on, the browser runs on one kept profile per browser, `kept-edge` or `kept-chrome`, with `--restore-last-session` (session cookies stay; with no startup window no tabs reopen, and the session files are removed before each launch so a headless browser reopens none either) and `--hide-crash-restore-bubble`. A browser still running on the kept profile, found through its `DevToolsActivePort`, is used instead of a second launch, which would only hand its window to that browser; `dsh-server-pid` names the server that closes it, and another live server only shares it. A port file whose browser is gone is removed. When the server ends because its input closed, it closes a kept-profile browser with `Browser.close` and waits up to 3 s, so cookies set in the last half minute are written; a browser whose DevTools connection drops gets the same 3 s to exit before it is killed. | Throwaway profile: tabs run in an isolated browser context (`Target.createBrowserContext`): none of the profile's cookies, sign-ins or history. Edge signs a new profile in to the Windows Microsoft account on its own; that sign-in stays outside the isolated context. Kept profile: tabs run in the profile's own context, with the sign-ins the user made in that window and, on Edge, the Windows Microsoft account's sign-in. |
+| agent | The first `set_value` on `new-tab` starts the browser chosen in settings (`browserApp`: by default the Windows default browser, and Chrome, then Edge, when that is neither) in a visible background-created window under `%LOCALAPPDATA%\dsh-computer-use-win\agent-browser`, with `--disable-sync`, `--disable-extensions` and `--mute-audio`, its frame tinted DSH blue (`--install-autogenerated-theme=65,118,230`); calls that arrive while it starts share that launch. The browser never inherits `__COMPAT_LAYER` and gets `--edge-skip-compat-layer-relaunch`: under a Windows compatibility layer Edge relaunches itself, and the new process has no DevTools pipe (issue #84). The browser is a child of the server process and closes after 10 idle minutes. By default every launch gets a fresh profile `profile-<server pid>-*`; profiles of servers that are gone are removed at the next launch, while the profile of a live server, or one whose lockfile a browser still holds, is left alone. With `browserSignIn` on, the browser runs on one kept profile per browser, `kept-edge` or `kept-chrome`, with `--restore-last-session` (session cookies stay; with no startup window no tabs reopen, and the session files are removed before each launch so a headless browser reopens none either) and `--hide-crash-restore-bubble`. A browser still running on the kept profile, found through its `DevToolsActivePort`, is used instead of a second launch, which would only hand its window to that browser; `dsh-server-pid` names the server that closes it, and another live server only shares it. A port file whose browser is gone is removed. When the server ends because its input closed, it closes a kept-profile browser with `Browser.close` and waits up to 3 s, so cookies set in the last half minute are written; a browser whose DevTools connection drops gets the same 3 s to exit before it is killed. | Throwaway profile: tabs run in an isolated browser context (`Target.createBrowserContext`): none of the profile's cookies, sign-ins or history. Edge signs a new profile in to the Windows Microsoft account on its own; that sign-in stays outside the isolated context. Kept profile: tabs run in the profile's own context, with the sign-ins the user made in that window and, on Edge, the Windows Microsoft account's sign-in. |
 | configured | `WCU_BROWSER_CDP_URL` (a `ws://` DevTools URL, or `http://host:port`). | That browser's own state. |
 
 ### Ids
@@ -420,6 +452,8 @@ Chromium pages (Chrome, Edge, Brave) can be read and operated over the Chrome De
 | `t1a2b:57` | An element in that tab. The number is handed out by the server run, never reused, and tied to the document it was read from. After the tab navigates, an id from the previous page fails with `BROWSER_ELEMENT_STALE`, even once the new page has been read: a new renderer numbers its DOM nodes from 1 again, so DOM node ids could name an element of the next page. An element removed from the page fails the same way. `web:t1a2b:57` is accepted too. |
 | `t1a2b:address` | The tab's address. `set_value` with a web address navigates; text without a scheme that looks like a host gets `https://`. A search needs the site's own search URL. |
 | `new-tab`, `b1c2d:new-tab` | `set_value` with a web address opens a background tab: `new-tab` in the agent browser, `b1c2d:new-tab` in that connected browser. |
+
+Chromium starts on demand. In `list_windows` and `health`, `browserLane.agent.state` distinguishes `notStarted`, `starting`, `ready` and `failed`. No browser entries are expected before the first request. Use `set_value` with only `{"elementId":"new-tab","value":"https://example.com/"}`, then pass `opened.id` as `browserTab` to read the page. A startup failure includes an error code and the process exit reason when available. To read the same visible Windows window after such a failure, take its `nativeWindowHandle` from `list_windows` and call `snapshot` with `browserTab` omitted or set to `"desktop"`. The explicit desktop marker requires a Windows target. Get a fresh desktop observation before using element IDs or coordinates. Desktop foreground keypresses may then use `thenKeys`.
 
 ### Tools
 
@@ -453,7 +487,7 @@ An alert, confirm, prompt or leave-page dialog blocks the page. It is reported a
 
 The visible agent browser shows what DSH does without covering the page, as Codex's Browser Use does. Its window frame is DSH blue. The tab DSH works in shows a blue arrow badge as its icon from the call's first command until the call ends and 2.5 s more, and in DSH for as long as the host holds the turn; then the page's own icon returns (a link the badge added is turned into a touch icon and removed, so Chrome drops it). A small glowing arrow moves to where DSH clicks, scrolls or types, with a ring on clicks. Both live in an isolated world: the arrow sits in a closed shadow root inside a `pointer-events: none`, `aria-hidden` element, its changes never reach the page's mutation observers, and screenshots hide it. A stopped call takes the badge off at once. A modal dialog holds page scripts, so the icon catches up when the dialog closes.
 
-The outline header reminds the model that page content is untrusted. Content inside iframes is not part of the outline yet; the result reports how many iframes were skipped. Elements that have no accessible structure, such as a canvas, cannot be clicked by page coordinates.
+The outline header reminds the model that page content is untrusted. The Chromium outline includes same-origin, cross-origin and nested iframe content. Element ids bind frame, renderer and document; frame navigation/removal invalidates them. With browserTab, click/double_click/move/scroll use CSS viewport x/y and drag uses a viewport path. Parent-page occlusion is checked before element clicks; all frame text remains untrusted and sensitive fields are redacted.
 
 ### Environment
 

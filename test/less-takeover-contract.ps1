@@ -1,9 +1,9 @@
-# Shipped less-takeover decisions on fake window, pointer and foreground APIs: no physical input.
+﻿# Shipped less-takeover decisions on fake window, pointer and foreground APIs: no physical input.
 $ErrorActionPreference='Stop'
 $tokens=$null; $parseErrors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '../scripts/windows-uia.ps1'),[ref]$tokens,[ref]$parseErrors)
 if($parseErrors.Count){throw ($parseErrors | Out-String)}
-foreach($name in @('Get-Prop','Invoke-Safe','Convert-Rect','Get-WindowProcessId','Get-RootWindow','Get-RootWindowAt','Get-WorkWindow','Resolve-InputWindow','Start-Input','Assert-PointOnTarget','Complete-Input','Assert-InFront','Invoke-Guarded')) {
+foreach($name in @('Get-Prop','Invoke-Safe','Convert-Rect','Get-WindowProcessId','Get-RootWindow','Get-RootWindowAt','Get-WorkWindow','Set-WorkWindow','Resolve-InputWindow','Start-Input','Assert-PointOnTarget','Complete-Input','Complete-BorrowedInput','Stop-InputHold','Assert-InFront','Assert-InputProcess','Assert-NativeInputTarget','Test-InputWindow','Invoke-Guarded','Get-KeyDestination','Get-ControlTypeName')) {
   $f=$ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
   if($null -eq $f){throw "missing function $name"}
   . ([scriptblock]::Create($f.Extent.Text))
@@ -11,19 +11,27 @@ foreach($name in @('Get-Prop','Invoke-Safe','Convert-Rect','Get-WindowProcessId'
 Add-Type -TypeDefinition @'
 using System; using System.Collections.Generic;
 public static class WindowsComputerUseNative {
+ public sealed class ProcessIdentity { public bool Gone,TokenAccessDenied; public string ImagePath=@"C:\fixture\app.exe";public uint Integrity=8192; }
+ public static ProcessIdentity ReadInputProcess(uint pid,bool checkImage){return new ProcessIdentity();}
+ public static uint ReadCurrentIntegrity(){return 8192;}
  public struct POINT {public int x,y;}
- public static long Front, AtPoint; public static int CursorX, CursorY, Gives, Sets; public static bool Menu, RefuseGive;
+ public static long Front, AtPoint; public static int CursorX, CursorY, Gives, Sets, ResponsiveCalls; public static bool Menu, RefuseGive, Responsive;
  public static Dictionary<long,uint> Pids=new Dictionary<long,uint>(); public static List<long> Popups=new List<long>();
- public static void Reset(){Front=AtPoint=0;CursorX=CursorY=Gives=Sets=0;Menu=RefuseGive=false;Pids.Clear();Popups.Clear();}
+ public static void Reset(){Front=AtPoint=0;CursorX=CursorY=Gives=Sets=ResponsiveCalls=0;Menu=RefuseGive=Responsive=false;Pids.Clear();Popups.Clear();}
+ public static bool IsResponsive(IntPtr h){ResponsiveCalls++;return Responsive;}
  public static IntPtr GetForegroundWindow(){return new IntPtr(Front);}
  public static bool GetCursorPos(ref POINT p){p.x=CursorX;p.y=CursorY;return true;}
  public static bool SetCursorPos(int x,int y){CursorX=x;CursorY=y;Sets++;return true;}
  public static uint GetWindowThreadProcessId(IntPtr h,out uint pid){pid=Pids.ContainsKey(h.ToInt64())?Pids[h.ToInt64()]:0;return pid;}
  public static IntPtr GetAncestor(IntPtr h,uint flags){return h;}
+ public static IntPtr GetWindow(IntPtr h,uint command){return h.ToInt64()==211?new IntPtr(200):IntPtr.Zero;}
  public static IntPtr WindowFromPoint(POINT p){return new IntPtr(AtPoint);}
  public static bool IsWindow(IntPtr h){return Pids.ContainsKey(h.ToInt64());}
  public static bool IsWindowVisible(IntPtr h){return Pids.ContainsKey(h.ToInt64());}
  public static bool InMenuMode(IntPtr h){return Menu;}
+ public static int PaintPolls;
+ public static bool RequestPaint(IntPtr h){return true;}
+ public static bool PaintPending(IntPtr h){return PaintPolls++ < 4;}
  public static long[] VisiblePopups(uint pid){return Popups.ToArray();}
  public static bool GiveForeground(IntPtr h){Gives++;if(RefuseGive)return false;Front=h.ToInt64();return true;}
  public static IntPtr SendMessageTimeout(IntPtr h,uint m,UIntPtr w,IntPtr l,uint f,uint t,out UIntPtr r){r=UIntPtr.Zero;return new IntPtr(1);}
@@ -47,7 +55,9 @@ Scene
 $state=Start-Input -InputObject $target -Hwnd 200
 Assert-Equal $N::Front 200 'target in front for the input'
 $N::CursorX=40;$N::CursorY=50;$state.moved=@{x=40;y=50}
+$state.drain=$true;$N::PaintPolls=0
 $result=[ordered]@{};Complete-Input $state $result
+Assert-Equal ($N::PaintPolls -ge 5) $true 'foreground release waits while the repaint is pending'
 Assert-Equal $result.foreground 'returned' 'foreground'; Assert-Equal $N::Front 100 'user window back in front'
 Assert-Equal $result.pointer 'returned' 'pointer'; Assert-Equal "$($N::CursorX),$($N::CursorY)" '500,600' 'pointer back where the user left it'
 Assert-Equal $script:InputWindow.hwnd 200 'input window remembered'; $checks+='borrow and give back'
@@ -115,10 +125,38 @@ Assert-Equal (Resolve-InputWindow ([pscustomobject]@{})) 100 'no host series: st
 $script:WcuSeries='["s",1]';$script:InputWindow=@{series='["s",1]';hwnd=[int64]250;at=0}
 Assert-Equal (Resolve-InputWindow ([pscustomobject]@{})) 100 'closed window: the window in front'; $checks+='targetless input follows DSH'
 
-# 8. The point must show the target or a window of its process.
+# 7b. Each result can say how its window was chosen (issue #82).
+Scene
+[void](Resolve-InputWindow ([pscustomobject]@{})); Assert-Equal $script:InputWindowVia 'front window' 'no target, no DSH window yet'
+$script:InputWindow=@{series='["s",1]';hwnd=[int64]200;at=0}
+[void](Resolve-InputWindow ([pscustomobject]@{})); Assert-Equal $script:InputWindowVia 'last DSH window' 'no target, DSH window this turn'
+[void](Resolve-InputWindow $target); Assert-Equal $script:InputWindowVia 'window target' 'explicit target'; $checks+='window choice reported'
+
+# 7c. A background element action (set_value on a field) makes its window the
+# one that a following keypress without a target goes to, not the window in front.
+Scene
+Set-WorkWindow 200
+Assert-Equal (Resolve-InputWindow ([pscustomobject]@{})) 200 'after a background action: its window'
+Assert-Equal $script:InputWindowVia 'last DSH window' 'reported as DSH window'
+Set-WorkWindow 0
+Assert-Equal $script:InputWindow.hwnd 200 'no window: nothing changes'; $checks+='background action sets the work window'
+
+# 7d. Where keys go: window, process, title and how it was chosen; the focused
+# control is read only from a window in front that answers messages.
+Scene
+$destination=Get-KeyDestination 200 'last DSH window'
+Assert-Equal $destination.nativeWindowHandle 200 'destination window'; Assert-Equal $destination.processId 2 'destination process'
+Assert-Equal $destination.title 'Notification' 'destination title'; Assert-Equal $destination.via 'last DSH window' 'destination via'
+Assert-Equal $destination.Contains('focus') $false 'background window: no focus read'; Assert-Equal $N::ResponsiveCalls 0 'background window: not even probed'
+$N::Front=200
+$destination=Get-KeyDestination 200 'window target'
+Assert-Equal $N::ResponsiveCalls 1 'window in front is probed first'; Assert-Equal $destination.Contains('focus') $false 'hung window: no UIA read'; $checks+='key destination'
+
+# 8. The point must show the target or its owned window, never a sibling of the same process.
 Scene
 $N::AtPoint=200; Assert-PointOnTarget 10 10 200
-$N::Pids[210]=2;$N::AtPoint=210; Assert-PointOnTarget 10 10 200
+$N::Pids[210]=2;$N::AtPoint=210; Expect-Error {Assert-PointOnTarget 10 10 200} 'POINT_COVERED'
+$N::Pids[211]=2;$N::AtPoint=211; Assert-PointOnTarget 10 10 200
 $N::Pids[500]=4;$N::AtPoint=500; Expect-Error {Assert-PointOnTarget 10 10 200} 'POINT_COVERED'; $checks+='covered point refused'
 
 # 9. Keys never go to a window that took the foreground in between.

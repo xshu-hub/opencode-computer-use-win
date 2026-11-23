@@ -5,13 +5,57 @@ import { mkdir, mkdtemp, writeFile, appendFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makePrivateTemp } from './private-temp.mjs';
 
 if (process.platform !== 'win32') throw new Error('These backend regression tests require Windows.');
 const checkout = fileURLToPath(new URL('../', import.meta.url));
 const powershell = process.env.WINDOWS_CU_POWERSHELL || 'powershell.exe';
 const root = await mkdtemp(path.join(process.env.WCU_TEST_OUTPUT || os.tmpdir(), 'wcu-isolated-tests-'));
+makePrivateTemp(root);
 if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `artifactRoot=${root}\n`);
 const suites = [
+  ['background-desktop',process.execPath,['test/background-desktop.mjs']],
+  ['work-modes-live',process.execPath,['test/work-modes-live.mjs']],
+  ['work-mode-contract',process.execPath,['test/work-mode-contract.mjs']],
+  ['input-hold',powershell,['-NoProfile','-File','test/input-hold.ps1']],
+  ['input-compose',process.execPath,['test/input-compose.mjs']],
+  ['restart-route',process.execPath,['test/restart-route.mjs']],
+  ['update-guard',process.execPath,['test/update-guard.mjs']],
+  ['observation-budget',process.execPath,['test/observation-budget.mjs']],
+  ['input-mutex',process.execPath,['test/input-mutex.mjs']],
+  ['shared-stop',process.execPath,['test/shared-stop.mjs']],
+  ['native-key-chord',powershell,['-NoProfile','-File','test/native-key-chord.ps1']],
+  ['takeover-remote',process.execPath,['test/takeover-remote.mjs']],
+  ['activity-unicode',process.execPath,['test/activity-unicode.mjs']],
+  ['ocr-memory-live',process.execPath,['test/ocr-memory-live.mjs']],
+  ['clipboard-chromium',process.execPath,['test/clipboard-chromium.mjs']],
+  ['precompiled-native',process.execPath,['test/precompiled-native.mjs']],
+  ['browser-private-transport',process.execPath,['test/browser-private-transport.mjs']],
+  ['browser-frames',process.execPath,['test/browser-frames.mjs']],
+  ['browser-observation',process.execPath,['test/browser-observation.mjs']],
+  ['settings-schema',process.execPath,['test/settings-schema.mjs']],
+  ['backend-ready',process.execPath,['test/backend-ready.mjs']],
+  ['rpc-protocol',process.execPath,['test/rpc-protocol.mjs']],
+  ['catalog-contract',process.execPath,['test/catalog-contract.mjs']],
+  ['printwindow-alignment',powershell,['-NoProfile','-File','test/printwindow-alignment.ps1']],
+  ['native-host-guard',process.execPath,['test/native-host-guard.mjs']],
+  ['input-safety-contract',powershell,['-NoProfile','-File','test/input-safety-contract.ps1']],
+  ['native-click-packet',powershell,['-NoProfile','-File','test/native-click-packet.ps1']],
+  ['policy',process.execPath,['test/policy.mjs']],
+  ['security-regressions',process.execPath,['test/security-regressions.mjs']],
+  ['protocol-validation',process.execPath,['test/protocol-validation.mjs']],
+  ['cancellation-event-mcp',process.execPath,['test/cancellation-event-mcp.mjs']],
+  ['capture-isolation',process.execPath,['test/capture-isolation.mjs']],
+  ['peer-compatibility',process.execPath,['test/peer-compatibility.mjs']],
+  ['takeover-restart',process.execPath,['test/takeover-restart.mjs']],
+  ['host-compatibility',process.execPath,['test/host-compatibility.mjs']],
+  ['clipboard-requester',powershell,['-NoProfile','-STA','-File','test/clipboard-requester.ps1']],
+  ['clipboard-focus-contract',powershell,['-NoProfile','-File','test/clipboard-focus-contract.ps1']],
+  ['presentation-failure',process.execPath,['test/presentation-failure.mjs']],
+  ['ui-copy',process.execPath,['test/ui-copy.mjs']],
+  ['diagnostics',process.execPath,['test/diagnostics.mjs']],
+  ['clipboard-delayed',powershell,['-NoProfile','-STA','-File','test/clipboard-delayed.ps1']],
+  ['browser-policy',process.execPath,['test/browser-policy.mjs']],
   ['source-encoding', process.execPath, ['test/source-encoding.mjs']],
   ['tool-context', process.execPath, ['test/tool-context.mjs']],
   ['lazy-tools', process.execPath, ['test/lazy-tools.mjs']],

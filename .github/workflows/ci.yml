@@ -19,12 +19,14 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Build reference settings extension
         run: npm run build
+      - name: Verify generated client and native helpers
+        run: node scripts/check-build.mjs
       - name: OpenCode adapter contracts
         run: npm test
       - name: Settings browser interaction and layout
         run: npm run test:ui
       - name: Shared backend contracts
-        run: node test/run-upstream-selected.mjs --powershell=pwsh.exe source-encoding lazy-tools overlay-strings atomic-json batch-browser progress-overlay browser-namespace browser-transport
+        run: node test/run-upstream-selected.mjs --powershell=pwsh.exe policy security-regressions observation-budget settings-schema catalog-contract rpc-protocol protocol-validation browser-private-transport browser-frames browser-observation browser-policy work-mode-contract precompiled-native source-encoding lazy-tools overlay-strings atomic-json batch-browser progress-overlay browser-namespace browser-transport
         timeout-minutes: 10
       - name: Screenshot transport fixtures
         run: node test/screenshot-output.mjs

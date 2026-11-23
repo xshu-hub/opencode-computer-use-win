@@ -18,6 +18,8 @@ try{
   assert.ok((await (await fetch(base+'/settings.js')).text()).length>100000);
   assert.ok((await readFile(path.join(root,'dist/THIRD_PARTY_LICENSES.txt'),'utf8')).includes('Permission is hereby granted'));
   const manifest=JSON.parse(await readFile(path.join(root,'package.json'),'utf8'));
+  assert.equal(typeof (await load(manifest.exports['./server'])).default.server,'function');
+  assert.equal(typeof (await load(manifest.exports['./tui'])).default.tui,'function');
   const info=await client.init();assert.equal(info.serverInfo.version,manifest.version);
   const catalog=await client.request('tools/list');assert.equal(catalog.tools.length,26);
   const result=await client.call('windows_computer_use_tools',{operation:'list'});assert.notEqual(result.isError,true);

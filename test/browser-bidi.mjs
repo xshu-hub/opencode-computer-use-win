@@ -1,7 +1,7 @@
 // No packages required. Default: offline unit tests. --live additionally starts
 // one owned headless Gecko instance; no registered Gecko => explicit skip.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -133,8 +133,17 @@ await test('kept profiles are executable-specific; a live owner blocks, a dead o
     // the lock of a server that crashed or was killed.
     writeFileSync(lock, '99999');
     const owned = await launchGecko({ executable, root, keep: true, spawnImpl });
-    assert.equal(spawned, 1); assert.equal(readFileSync(lock, 'utf8'), String(process.pid));
+    assert.equal(spawned, 1);
+    await assert.rejects(launchGecko({ executable, root, keep: true, spawnImpl }), /BROWSER_PROFILE_BUSY.*running process/);
+    assert.equal(spawned, 1, 'An active directory lock cannot be reaped or bypassed');
     await owned.stop(); assert.equal(existsSync(lock), false); assert.equal(existsSync(profile), true, 'The kept profile stays');
+    writeFileSync(lock, '');
+    await assert.rejects(launchGecko({ executable, root, keep: true, spawnImpl }), /BROWSER_PROFILE_BUSY/);
+    const stale = new Date(Date.now() - 60_000);
+    utimesSync(lock, stale, stale);
+    const recovered = await launchGecko({ executable, root, keep:true, spawnImpl });
+    await recovered.stop();
+    assert.equal(spawned,2,'A stale empty PID file cannot permanently block the kept profile');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 await test('owned launch has isolated flags, parses split stderr and cleanup is idempotent', async () => {
@@ -177,7 +186,7 @@ class FakeBidi {
     if (method === 'browsingContext.navigate') { this.emit('browsingContext.navigationStarted', { context: params.context, url: params.url }); return { navigation: 'n', url: params.url }; }
     if (method === 'browsingContext.getTree') return { contexts: Array.from({ length: this.next }, (_, i) => ({ context: `context-${i + 1}`, url: 'https://fixture.test' })) };
     if (method === 'script.callFunction') {
-      if (params.functionDeclaration === domOutline.toString()) return { type: 'success', result: remote({ title: 'Fixture', url: 'https://fixture.test', entries: [
+      if (params.functionDeclaration.includes(domOutline.toString())) return { type: 'success', result: remote({ title: 'Fixture', url: 'https://fixture.test', entries: [
         { node: { sharedId: 'field' }, role: 'textbox', name: '关键词', value: this.value, states: [] },
         { node: { sharedId: 'button' }, role: 'button', name: '提交', value: '', states: [] }], iframes: 0, truncated: false }) };
       if (params.arguments?.[0]?.value === 'set') this.value = params.arguments[1].value;
@@ -311,7 +320,7 @@ await test('DOM setters reject detached/disabled/readonly without side effects',
   assert.throws(() => domElement.call({ ...base, readOnly: true }, 'set', 'x'), /read-only/);
   assert.throws(() => domElement.call({ ...base, type: 'checkbox' }, 'set', 'maybe'), /true or false/);
   assert.throws(() => domElement.call({ ...base, type: 'radio', checked: true }, 'set', 'false'), /radio/);
-  assert.equal(domElement.call({ ...base, type: 'password', value: 'secret' }, 'read'), '[redacted]');
+  assert.equal(domElement.call({ ...base, type: 'password', value: 'secret' }, 'read'), '[redacted; length=6]');
 });
 await test('select options validate atomically and checkbox uses one click', () => {
   const base = { isConnected: true, matches: () => false, closest: () => null, getAttribute: () => null };

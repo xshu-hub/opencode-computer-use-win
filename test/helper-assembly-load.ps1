@@ -25,7 +25,18 @@ function Invoke-Phase([string]$Name) {
 if ($Phase -eq 'main') {
   $Cache = Join-Path ([IO.Path]::GetTempPath()) ('wcu-helper-load-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
   New-Item -ItemType Directory -Path $Cache | Out-Null
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+  $acl=[Security.AccessControl.DirectorySecurity]::new()
+  $acl.SetAccessRuleProtection($true,$false)
+  foreach($owner in @($sid,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($owner,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+  }
+  if ($isDesktop) { [IO.Directory]::SetAccessControl($Cache,$acl) }
+  else { [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Cache),$acl) }
   try {
+    $created = Invoke-Phase 'cache-dir'
+    if (-not $created.private) { throw "The first start did not create a private native cache: $($created | ConvertTo-Json -Compress)" }
+    Write-Output 'PASS a first start with the usual TEMP creates the native cache under LocalApplicationData, private to the user and SYSTEM'
     $failure = Invoke-Phase 'compile-failure'
     if (-not $failure.cleaned) { throw 'A failed compilation left its private partial DLL' }
     Write-Output 'PASS failed compilation reports the original error and removes only its private partial DLL'
@@ -52,10 +63,9 @@ if ($Phase -eq 'main') {
     $second = Invoke-Phase 'load'
     if (-not $second.native) { throw 'The native helper did not load from the marked cache' }
     if (-not $second.ocr) { throw "The OCR helper did not load from the marked cache: $($second.ocrError)" }
-    if ($first.wgc -and -not $second.wgc) { throw "The WGC helper did not load from the marked cache: $($second.wgcError)" }
     if ($second.compiled) { throw 'The second start recompiled instead of loading the cached helpers' }
     if ($isDesktop -and $second.ocrText -notmatch '54') { throw "OCR from the marked cache did not read the test image: '$($second.ocrText)'" }
-    Write-Output ("PASS native, OCR{0} helpers load from the marked cache; OCR read '{1}'" -f $(if ($second.wgc) { ' and WGC' } else { " (WGC unavailable here: $($first.wgcError))" }), $second.ocrText)
+    Write-Output ("PASS native and OCR helpers load from the marked cache; OCR read '{0}'" -f $second.ocrText)
   } finally {
     $cacheFull = [IO.Path]::GetFullPath($Cache)
     $tempFull = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
@@ -79,15 +89,41 @@ if ($Phase -eq 'loadfrom') {
 
 # Phase 'load': the backend's own definitions, run as the backend runs them.
 $script:BackendStartupWatch = [System.Diagnostics.Stopwatch]::StartNew()
-foreach ($name in 'WcuCs', 'WcuOcrCs', 'WgcCs') {
+foreach ($name in 'WcuCs', 'WcuOcrCs') {
   $assignment = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq "`$script:$name" }, $false)
   if ($null -eq $assignment) { throw "Missing helper source $name" }
   . ([scriptblock]::Create($assignment.Extent.Text))
 }
-foreach ($name in 'Write-BackendStage', 'Get-CsHash', 'Remove-TempFile', 'Remove-StaleHelperParts', 'Import-HelperAssembly', 'Load-Assemblies', 'Set-DpiAware', 'Get-OcrHelper', 'Get-WgcHelper') {
+foreach ($name in 'Write-BackendStage', 'Get-CsHash', 'Get-HelperCacheDir', 'Assert-PrivateHelperPath', 'Get-HelperDigest', 'Remove-TempFile', 'Remove-StaleHelperParts', 'Import-HelperAssembly', 'Load-Assemblies', 'Set-DpiAware', 'Get-OcrHelper') {
   $function = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
   if ($null -eq $function) { throw "Missing backend function $name" }
   . ([scriptblock]::Create($function.Extent.Text))
+}
+if ($Phase -eq 'cache-dir') {
+  # With the usual TEMP the backend keeps its helpers in
+  # LocalApplicationData\dsh-computer-use-win\native-cache, created private on
+  # the first start. PowerShell 7 creates it through FileSystemAclExtensions;
+  # 0.6.2 passed that call its arguments in the wrong order, so a first start
+  # under pwsh failed at native-load-start. The suites set their own TEMP and
+  # never reached this branch, so LocalApplicationData points into the cache.
+  $local = Join-Path $Cache 'local'
+  [void][IO.Directory]::CreateDirectory((Join-Path $local 'Temp'))
+  $local = (Get-Item -LiteralPath $local).FullName
+  $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-HelperCacheDir' }, $true).Extent.Text
+  $redirected = $definition.Replace("[Environment]::GetFolderPath('LocalApplicationData')", "'" + $local.Replace("'", "''") + "'")
+  if ($redirected -eq $definition) { throw 'Get-HelperCacheDir no longer reads LocalApplicationData' }
+  . ([scriptblock]::Create($redirected))
+  $env:TEMP = Join-Path $local 'Temp'; $env:TMP = $env:TEMP
+  $expected = Join-Path $local 'dsh-computer-use-win\native-cache'
+  $dir = Get-HelperCacheDir
+  $item = [IO.DirectoryInfo]::new($expected)
+  $sections = [Security.AccessControl.AccessControlSections]::Access
+  $acl = if ($isDesktop) { $item.GetAccessControl($sections) } else { [IO.FileSystemAclExtensions]::GetAccessControl($item, $sections) }
+  $sids = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $private = $dir -eq $expected -and $item.Exists -and $acl.AreAccessRulesProtected -and $sids -contains $user -and -not @($sids | Where-Object { $_ -ne $user -and $_ -ne 'S-1-5-18' }).Count
+  [ordered]@{ private = [bool]$private; dir = $dir; sids = $sids; protected = $acl.AreAccessRulesProtected } | ConvertTo-Json -Compress
+  exit 0
 }
 if ($Phase -eq 'compile-failure') {
   $failedDll = Join-Path $Cache 'wcu-failure.dll'
@@ -110,11 +146,10 @@ if ($Phase -eq 'compile-failure') {
   exit 0
 }
 $before = @(Get-ChildItem -LiteralPath $Cache -Filter 'wcu-*.dll').Count
-$result = [ordered]@{ native = $false; ocr = $false; wgc = $false; compiled = $false; ocrText = ''; ocrError = ''; wgcError = '' }
+$result = [ordered]@{ native = $false; ocr = $false; compiled = $false; ocrText = ''; ocrError = '' }
 Load-Assemblies
 $result.native = [bool]('WindowsComputerUseNative' -as [type])
 try { Get-OcrHelper; $result.ocr = [bool]('WindowsComputerUseOcr' -as [type]) } catch { $result.ocrError = $_.Exception.Message }
-try { Get-WgcHelper; $result.wgc = [bool]('WgcCapture' -as [type]) } catch { $result.wgcError = $_.Exception.Message }
 $result.compiled = @(Get-ChildItem -LiteralPath $Cache -Filter 'wcu-*.dll').Count -gt $before
 if ($result.ocr -and $isDesktop) {
   $png = Join-Path $Cache 'ocr-54.png'

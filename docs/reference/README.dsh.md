@@ -14,13 +14,13 @@
 
 ## 简体中文
 
-这个插件让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）里的 agent 看到并操作你电脑上真实的 Windows 程序和网页：找到按钮和输入框，读出屏幕上的文字，点击、打字，切换和管理窗口。网页默认在 DSH 自己的浏览器里后台完成，不动你的鼠标，也不抢前台。
+这个插件让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）看到并操作你电脑上真实的 Windows 程序和网页：找到按钮和输入框，读出屏幕上的文字，点击、打字，切换和管理窗口。网页默认在 DSH 自己的浏览器里后台完成，不动你的鼠标，也不抢前台。
 
 **网页在后台完成 · 浮窗按步骤显示 DSH 在想什么、做什么 · 25 个操作工具 + 1 个管理入口 · 用到鼠标键盘时有明显提示 · 按 Esc 随时停止 · 中英文设置界面**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/how-it-works-zh-dark.png">
-  <img alt="使用流程图。第 1 步：右键托盘图标打开 DSH 终端，运行安装命令，再退出并重新打开 DSH Desktop；设置里“网页与浏览器”下的“优先用网页控件操作”和“显示 DSH 浏览器窗口”默认打开，不改也能直接用。第 2 步：在对话里布置任务，对话中出现“输入了文本”“发送了按键”“检查了操作结果”等记录。第 3 步：网页在 DSH 浏览器里后台操作，它的窗口框是 DSH 蓝，正在操作的标签页图标换成蓝色箭头，网页上一个小箭头标出它点的位置，不遮挡网页；你正在用的窗口留在前面，鼠标不受影响，点 DSH 的停止按钮可以停止；操作桌面程序、用到鼠标键盘时，屏幕边缘发亮，出现“DSH 正在控制电脑”提示条和鼠标旁的 DSH 标签，按 Esc 立即停止这一轮；屏幕角落的思考与操作浮窗按步骤显示 DSH 的思考和操作，鼠标从它上面穿过，光标停在它右上角的锁上就能拖动和缩放。下方是 agent 每一步的循环：观察、定位、执行、确认，网页和桌面程序用同一套工具，执行这一步也可以用 batch 一次做完几个动作，没达到目标就再观察一次。" src="assets/diagrams/how-it-works-zh-light.png">
+  <img alt="使用流程图。第 1 步：右键托盘图标打开 DSH 终端，运行安装命令，再退出并重新打开 DSH Desktop；设置里“网页与浏览器”下的“优先使用网页控件”和“显示 DSH 浏览器窗口”默认打开，不改也能直接用。第 2 步：在对话里布置任务，对话中出现“输入了文本”“发送了按键”“检查了操作结果”等记录。第 3 步：网页在 DSH 浏览器里后台操作，它的窗口框是 DSH 蓝，正在操作的标签页图标换成蓝色箭头，网页上一个小箭头标出它点的位置，不遮挡网页；你正在用的窗口留在前面，鼠标不受影响，点 DSH 的停止按钮可以停止；操作桌面程序、用到鼠标键盘时，屏幕边缘发亮，出现“DSH 正在控制电脑”提示条和鼠标旁的 DSH 标签，按 Esc 立即停止这一轮；屏幕角落的思考与操作浮窗按步骤显示 DSH 的思考和操作，鼠标从它上面穿过，光标停在它右上角的锁上就能拖动和缩放。下方是 agent 每一步的循环：观察、定位、执行、确认，网页和桌面程序用同一套工具，执行这一步也可以用 batch 一次做完几个动作，没达到目标就再观察一次。" src="assets/diagrams/how-it-works-zh-light.png">
 </picture>
 
 **目录**：[1 快速开始](#1-快速开始) · [2 界面预览](#2-界面预览) · [3 能做什么](#3-能做什么) · [4 工作原理](#4-工作原理) · [5 设置](#5-按你的习惯设置) · [6 使用示例](#6-使用示例) · [7 工具与进阶](#7-工具与进阶) · [8 常见问题](#8-常见问题) · [9 数据与隐私](#9-数据与隐私) · [10 文档与开发](#10-文档与开发) · [English](#english)
@@ -42,9 +42,13 @@
 
 #### 1.2 升级
 
-运行同一条安装命令，然后像上面第 2 步那样完全退出、再重新打开 DSH Desktop。
+DSH 启动时按 npm 的 `latest` 自动检查。**设置 → 电脑操控** 的更新入口在标题右侧。项目说明折叠时，入口位于 GitHub 链接左边。点 **检查更新** 会立即再查，发现新版后按钮会变成 **更新**。点 **更新** 后，插件市场下载安装，标题下方显示当前步骤和进度。市场开始替换插件文件前，可以点 **停止更新** 保留现有版本。市场收录新版通常比 npm 晚一些。新版刚发布、市场还没同步时，页面会自动等待同步后再安装。按钮更新失败时，可以从页面直达插件市场的 **已安装** 再试。下载跟随插件市场的 **下载区域** 设置。选 **全球** 直接从 npm 下载，选 **中国大陆** 则走镜像。
 
-命令里的 `desktop` 是 DSH Desktop 使用的配置（profile）。如果装到了别的 profile，正在用的 DSH 不会有任何变化。
+**从 0.6.3 起**，安装完成后会弹出确认。点 **立即重启**，DSH Desktop 会正常退出并自动重新打开。点 **稍后**，标题旁会保留 **重启以完成更新**，可以随时重新打开确认。
+
+**从 0.6.1 或 0.6.2 升到 0.6.3** 时，由旧版页面执行更新。先右键任务栏托盘里的 DSH 图标，选 **退出**，再打开 DSH Desktop。先别用电脑操控，直接在 **设置 → 电脑操控** 点 **更新**。如果看到 **仍要更新**，点它继续。装好后设置页会立即换成新版，后台仍运行旧版。这一次没有重启确认。请再次从托盘 **退出** 并打开 DSH Desktop，重启前先别改电脑操控设置。如果提示插件被移除，退出并打开 DSH Desktop 后可从插件市场重新安装，原来的设置会保留。
+
+也可以运行上面的安装命令，再从托盘退出并重新打开 DSH Desktop。没有插件市场或从本地文件安装时，**更新** 会打开这段说明。命令里的 `desktop` 指 DSH Desktop 使用的配置（profile）。安装到其他 profile 时，正在用的 DSH 不会有任何变化。
 
 #### 1.3 其他安装方式
 
@@ -84,7 +88,7 @@ DSH Web 和单独的 MCP 客户端会用你电脑上的 Node.js 运行插件，�
 
 ### 2. 界面预览
 
-下面是 DSH Desktop 2.0.18 里的真实截图（中文界面），只保留了浏览器窗口、对话或设置面板，点击图片可以看原图。设置页截图来自 0.5.4；浏览器截图来自 0.5.2，对话截图来自更早的一次搜索任务，这两处的界面到 0.5.4 都没有变。浮窗图用的是一次真实任务的记录，由插件自己的浮窗程序重新画出来。
+下面是 DSH Desktop 2.0.18 里的真实截图（中文界面），只保留了浏览器窗口、对话或设置面板，点击图片可以看原图。设置页总览截图来自 0.6.1，其他设置截图来自 0.6.0；浏览器截图来自 0.5.2，对话截图来自更早的一次搜索任务，这两处的界面到 0.6.1 都没有变。浮窗图用的是一次真实任务的记录，由插件自己的浮窗程序重新画出来。
 
 #### 2.1 网页在 DSH 浏览器里操作
 
@@ -100,34 +104,40 @@ DSH Web 和单独的 MCP 客户端会用你电脑上的 Node.js 运行插件，�
 
 #### 2.3 思考与操作浮窗
 
-DSH 操作电脑时，屏幕角落有一个半透明的浮窗，按步骤显示它在想什么、做了什么。每一步一个小标题，写明这一步的操作，后面是这一步的思考文字，和对话里看到的一致。任务结束后，标题变成“已完成 · 步数 · 用时”，浮窗从回复开头显示结果，再保留 20 秒。这样你不用把 DSH 窗口拉到前面查看进度，也就不会打断它的操作。浮窗、提示条和 AI 总结的文字跟着 DSH 的界面语言走：DSH 里选了哪种语言就用哪种，没选时跟系统；中文以外的语言暂时显示英文。
+DSH 操作电脑时，屏幕角落有一个半透明的浮窗，按步骤显示它在想什么、做了什么。每一步一个小标题，写明这一步的操作，后面是这一步的思考文字，和对话里看到的一致。任务结束后，标题变成“已完成 · 步数 · 用时”，浮窗从回复开头显示结果，再保留 20 秒。这样你不用把 DSH 窗口拉到前面查看进度，也就不会打断它的操作。浮窗、提示条和 AI 总结的文字跟着 DSH 的界面语言走：DSH 里选了哪种语言就用哪种，没选时跟系统；目前提供中文、英文和俄文，其他语言暂时显示英文。设置页在俄文环境下仍显示英文。
 
 ![思考与操作浮窗的两个画面，取自一次真实的“打开浏览器搜索晴天并下滑到底”任务，由插件的浮窗程序按记录重新画出：左边是执行中，标题“DSH · 第 3 步 · 执行中”，副标题“连续执行 7 个操作：滚动页面、等待”，下面是模型这一步的思考（这个模型用英文思考）；右边是结束后，标题“DSH · 已完成 · 10 步 · 41 秒”，下面从回复开头显示“已完成：我打开了一个新的浏览器标签页，在必应上搜索「晴天」，并一直下滑到页面最底部。”；两个浮窗的右上角都是锁形按钮](assets/desktop-progress-overlay-hd.png)
 
-浮窗默认锁定，鼠标从它上面穿过，不会挡住你或 DSH 的点击。想换位置或大小时，把光标移到右上角的锁上停一下，浮窗就会临时解锁：拖标题移动，拖边缘缩放，光标离开后自动锁回。这个按钮只认你自己的鼠标，DSH 操作时移动的光标不会触发它。浮窗默认直接显示 DSH 的输出，不额外消耗 token；也可以在设置里改成“AI 总结当前操作”，让当前对话的模型每隔一段时间写一两句进度说明，这会额外消耗 token。
+浮窗默认锁定，鼠标从它上面穿过，不会挡住你或 DSH 的点击。想换位置或大小时，把光标移到右上角的锁上停一下，浮窗就会临时解锁：拖标题移动，拖边缘缩放，光标离开后自动锁回。这个按钮只认你的鼠标，通过 UU 远程等远程控制软件操作的鼠标也算；DSH 操作时移动的光标不会触发它。浮窗默认直接显示 DSH 的输出，不额外消耗 token；也可以在设置里改成“AI 总结”，让当前对话的模型每隔一段时间写一两句进度说明，这会额外消耗 token。
 
 #### 2.4 设置页
 
-设置在左侧的“电脑操控”（鼠标图标）里。最上面是“网页与浏览器”：优先用网页控件操作、显示 DSH 浏览器窗口、浏览器类型、保留网站登录状态，以及默认关闭的“操作已打开的浏览器（实验性）”。下面选工具加载方案：全部、精简、懒启动或自定义，默认是“全部”（26 个工具）。再往下是接管提示、思考与操作浮窗和停止操作。每项左边的小图跟着设置变化，说明收在 ⓘ 图标里。顶部的 Star 和 Issue 说明可以折叠成一个链接，下图就是折叠后的样子，点“展开”就能恢复。
+在左侧打开带鼠标图标的 **电脑操控**。标题旁显示插件版本，右侧有 **检查更新** 或 **更新**，以及 **反馈问题**。**工作方式** 可以选 **少打扰**（默认）、**前台操作** 或 **虚拟机**。少打扰会尽量在后台操作，详细说明默认折叠在 **更多说明** 里。前台操作直接使用鼠标和键盘。虚拟机模式在配置好的 Hyper-V 虚拟机里操作。
 
-![电脑操控设置页：左侧是带鼠标图标的电脑操控选项卡，顶部是折叠后的项目链接；“网页与浏览器”分组里有优先用网页控件操作、显示 DSH 浏览器窗口、浏览器类型、保留网站登录状态、操作已打开的浏览器（实验性）五项，每项左边有小示意图；下面的工具分组显示已启用 26 / 26，可以选全部、精简、懒启动、自定义四种加载方案](assets/desktop-settings-overview-hd.png)
+页面上还能调整工具加载方案、网页与浏览器、接管提示、思考与操作浮窗和停止快捷键。每项左边的小图会随设置变化，说明收在 ⓘ 图标里。顶部的 Star 和 Issue 说明可以折叠，折叠后只留 GitHub 链接和展开箭头，升级后也会保持这个选择。
+
+*下图取自 v0.6.1。当时还没有“工作方式”和“检查更新”，只有发现新版时才会显示“更新”。*
+
+![v0.6.1 的电脑操控设置页，显示展开的项目说明、反馈问题按钮、工具与网页设置](assets/desktop-settings-overview-hd.png)
 
 #### 2.5 更多截图
 
 <details>
 <summary>任务总结、自定义工具、浮窗设置、接管提示、停止设置</summary>
 
+*下面的自定义工具、浮窗、接管提示和停止设置截图取自 v0.6.0。*
+
 **任务总结。** 一轮操作结束后，agent 会说明自己做了什么、在结果页里确认了什么。图中的文字由这次任务用的模型生成。
 
 ![浏览器搜索晴天后的真实对话总结：新建Edge窗口、输入搜索词，并确认周杰伦出现在结果中](assets/desktop-search-result-hd.png)
 
-**自定义工具。** 选“自定义”后会展开工具清单，可以一个个勾选，也可以整组勾选。图中是没有保存的演示，截完图就放弃了。
+**自定义工具。** 选“自定义”后会展开工具清单，默认全部勾选，可以一个个取消，也可以整组取消，再点“保存更改”。图中是没有保存的演示，截完图就放弃了。
 
-![自定义方案展开后的部分分组清单，支持全选、全部关闭和按组选择](assets/desktop-settings-tools-custom-hd.png)
+![选“自定义”后展开的工具清单：默认全部勾选，已启用 26 / 26，有全选、全部关闭和按组勾选](assets/desktop-settings-tools-custom-hd.png)
 
-**浮窗设置。** “显示思考与操作浮窗”和“锁定并穿透鼠标”两个开关改了就生效。展开更多选项，可以选浮窗内容：默认直接显示 DSH 输出，选“AI 总结当前操作”会额外消耗 token。再往下能调背景不透明度、大小、位置和锁定快捷键。点“打开浮窗并调整”会显示 60 秒的预览，方便把浮窗拖到合适的位置。
+**浮窗设置。** “显示思考与操作浮窗”和“锁定并穿透鼠标”两个开关改了就生效。展开更多选项，可以选浮窗内容：默认“原文”，直接显示 DSH 的思考和输出；选“AI 总结”会额外消耗 token。再往下能调背景不透明度、大小、位置和锁定快捷键。点“打开浮窗并调整”会显示 60 秒的预览，方便把浮窗拖到合适的位置。
 
-![思考与操作浮窗设置：显示思考与操作浮窗、锁定并穿透鼠标两个开关，各有小示意图，右上角是“打开浮窗并调整”按钮；展开的更多选项里有说明文字、浮窗内容（直接显示 DSH 输出）和背景不透明度（60）](assets/desktop-settings-overlay-hd.png)
+![思考与操作浮窗设置：显示思考与操作浮窗、锁定并穿透鼠标两个开关，各有小示意图，右上角是“即时生效”字样和“打开浮窗并调整”按钮；展开的更多选项里有一句说明“拖放或缩放自动保存，调好点 × 即可”，浮窗内容选的是“原文（默认）”，背景不透明度是 60](assets/desktop-settings-overlay-hd.png)
 
 **接管提示。** agent 用鼠标键盘操作桌面时，屏幕边缘会亮起蓝色光晕，顶部或底部出现“DSH 正在控制电脑”提示条（英文界面显示英文），鼠标旁跟着一个 DSH 标签。屏幕提示和鼠标提示可以分别开关，点“预览”能在你的屏幕上试看；提示位置、文字、保留时长和远程录屏可见收在“更多选项”里。
 
@@ -171,7 +181,7 @@ agent 每一步都按“观察 → 定位 → 执行 → 确认”来做，开�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/architecture-zh-dark.png">
-  <img alt="整体架构图。你在 DSH 里布置任务、调整设置，按 Esc 停止。DSH 里有 agent、插件适配器 mcp/dsh-plugin.mjs（把设置交给服务，跟踪对话轮次，并把这段对话的思考和步骤交给浮窗）、设置页与操作记录 mcp/client.js，以及官方 MCP 桥。MCP 桥通过 stdio 连到 MCP 服务 mcp/server.mjs，服务按方案提供工具（全部 26、精简 12、懒启动 1、自定义），检查参数后把每次调用交给两条通道之一。浏览器操控（Browser Use）：带 browserTab 或网页元素 ID 的调用交给服务里的浏览器通道 mcp/browser.mjs，它通过 Chrome DevTools 协议（CDP）读网页、在网页里操作，不动鼠标、不抢前台、不显示接管提示；它连接 DSH 专用浏览器（默认跟随 Windows 的默认浏览器，每次用临时空白配置；打开“保留网站登录状态”后改用长期保留的配置）；打开实验性的“操作已打开的浏览器”并在浏览器里点“允许”后，也能操作你自己已经打开的 Chrome 或 Edge。电脑操控（Computer Use）：其余调用一个一个交给常驻的 PowerShell 后端 scripts/windows-uia.ps1，后端通过 UI Automation、鼠标键盘、窗口、截图和文字识别操作你的 Windows 桌面，浏览器工具栏和浏览器通道读不到的网页内容也走这里。接管助手 scripts/windows-takeover.ps1 是独立进程，在电脑操控用到鼠标键盘时显示屏幕提示，按步骤显示思考与操作浮窗，并直接监听 Esc，不经过 DSH。" src="assets/diagrams/architecture-zh-light.png">
+  <img alt="整体架构图。你在 DSH 里布置任务、调整设置，按 Esc 停止。DSH 里有 Agent 循环、插件适配器 mcp/dsh-plugin.mjs（把设置交给服务，跟踪对话轮次，并把这段对话的思考和步骤交给浮窗）、设置页与操作记录 mcp/client.js，以及官方 MCP 桥。MCP 桥通过 stdio 连到 MCP 服务 mcp/server.mjs，服务按方案提供工具（全部 26、精简 12、懒启动 1、自定义），检查参数后把每次调用交给两条通道之一。浏览器操控（Browser Use）：带 browserTab 或网页元素 ID 的调用交给服务里的浏览器通道 mcp/browser.mjs，它通过 Chrome DevTools 协议（CDP）读网页、在网页里操作，不动鼠标、不抢前台、不显示接管提示；它连接 DSH 专用浏览器（默认跟随 Windows 的默认浏览器，每次用临时空白配置；打开“保留网站登录”后改用长期保留的配置）；打开实验性的“连接现有浏览器”并在浏览器里点“允许”后，也能操作你自己已经打开的 Chrome 或 Edge。电脑操控（Computer Use）：其余调用一个一个交给常驻的 PowerShell 后端 scripts/windows-uia.ps1，后端通过 UI Automation、鼠标键盘、窗口、截图和文字识别操作你的 Windows 桌面，浏览器工具栏和浏览器通道读不到的网页内容也走这里。接管助手 scripts/windows-takeover.ps1 是独立进程，在电脑操控用到鼠标键盘时显示屏幕提示，按步骤显示思考与操作浮窗，并直接监听 Esc，不经过 DSH。" src="assets/diagrams/architecture-zh-light.png">
 </picture>
 
 图里蓝色的部分是本插件的代码，灰色的部分由 DSH、Windows 或浏览器提供。各部分的分工如下：
@@ -193,18 +203,21 @@ agent 每一步都按“观察 → 定位 → 执行 → 确认”来做，开�
 
 | 设置 | 可以怎么选 |
 |---|---|
-| 优先用网页控件操作 | 默认打开。网页能直接读写时在后台完成，不动鼠标、不抢前台；桌面程序和读不到的网页内容再交给电脑操控 |
+| 更新 | 标题右侧 GitHub 左边的按钮：平时是“检查更新”，有新版本时变成“更新”，点了才安装，见 1.2 |
+| 反馈问题 | 保存诊断 TXT 到下载文件夹并打开 GitHub 新建问题页面，见 8.4 |
+| 工具加载 | **全部**（26 个，默认）；**精简**（12 个常用工具）；**懒启动**（开始只加载 1 个管理工具，需要时再加载，全部工具都允许）；**自定义**（逐个或整组勾选） |
+| 工作方式 | **少打扰**（默认）：你照常用电脑，任务也不耽搁。能在后台做的都在后台做，DSH 自己打开的程序放在看不见的后台桌面里；必须用鼠标键盘的步骤马上做、只借一下，你这期间按的键和鼠标动作先存住，随后补到你的窗口；只在你按着键、拼音没上屏或在用全屏程序时等一下；**前台操作**：适合你暂时不用电脑时，DSH 把窗口放在最前面，直接用鼠标键盘，按 Esc 停止；**虚拟机**：在一台 Hyper-V 虚拟机里操作，完全不碰你的电脑，设置页列出一次性的配置步骤。见[设置与停止](docs/computer-use-settings.md) |
+| 优先使用网页控件 | 默认打开。网页能直接读写时在后台完成，不动鼠标、不抢前台；桌面程序和读不到的网页内容再交给电脑操控 |
 | 显示 DSH 浏览器窗口 | 默认打开，能看到 DSH 浏览器在做什么；关掉后它在后台运行，没有窗口 |
 | 浏览器类型 | 默认跟随 Windows 的默认浏览器，也可以选 Edge、Chrome 或 Firefox 系（实验）；默认浏览器不是 Edge 或 Chrome 时，用已安装的 Chrome 或 Edge。选 Firefox 系时先用 Windows 默认的那一个，见 [Firefox 系浏览器](docs/browser-bidi.md) |
-| 保留网站登录状态 | 默认关闭。打开后 DSH 专用浏览器改用长期保留的配置，你在它的窗口里登录过的网站，下次还是登录状态；你自己的浏览器里不用做任何设置，也不会弹出允许提示。设置页会说明怎么登录、登录存在哪、有哪些风险，见 7.4 |
-| 操作已打开的浏览器（实验性） | 默认关闭。打开后，agent 可以操作你自己已经打开的 Chrome 或 Edge。先在浏览器的 `chrome://inspect/#remote-debugging`（Edge 是 `edge://inspect/#remote-debugging`）里允许远程调试；之后每次连接，浏览器都会问你是否允许。只连“浏览器类型”选中的浏览器，选“默认”时连 Windows 的默认浏览器；选 Firefox 系时不可用。见 7.4 |
-| 工具加载 | **全部**（26 个，默认）；**精简**（12 个常用工具）；**懒启动**（开始只加载 1 个管理工具，需要时再加载，全部工具都允许）；**自定义**（逐个或整组勾选） |
+| 保留网站登录 | 默认关闭。打开后 DSH 专用浏览器改用长期保留的配置，你在它的窗口里登录过的网站，下次还是登录状态；你自己的浏览器里不用做任何设置，也不会弹出允许提示。设置页会说明怎么登录、登录存在哪、有哪些风险，见 7.4 |
+| 连接现有浏览器（实验） | 默认关闭。打开后，agent 可以操作你自己已经打开的 Chrome 或 Edge。先在浏览器的 `chrome://inspect/#remote-debugging`（Edge 是 `edge://inspect/#remote-debugging`）里允许远程调试；之后每次连接，浏览器都会问你是否允许。只连“浏览器类型”选中的浏览器，选“默认”时连 Windows 的默认浏览器；选 Firefox 系时不可用。见 7.4 |
 | 屏幕提示 | 开关屏幕边缘光晕和提示条；可以改提示文字，放在顶部或底部，并设置结束后多久收起（0.2–3 秒） |
 | 鼠标提示 | 单独开关鼠标旁的光斑和 DSH 标签。不会改你的系统鼠标样式，调大了的指针也会自动避开 |
 | 远程与录屏可见 | 默认打开，让 UU 远程、屏幕共享和录屏也能看到提示和思考与操作浮窗，包括浮窗里模型的思考和回复。换显示器、调整布局或缩放后会自动跟上 |
-| 思考与操作浮窗 | 默认打开，开关改了就生效。“锁定并穿透鼠标”默认打开，这时把光标停在浮窗右上角的锁上，就能临时解锁去拖动和缩放。更多选项里可以选浮窗内容（直接显示 DSH 输出，或者 AI 总结当前操作），调背景不透明度、大小、位置和锁定快捷键。“打开浮窗并调整”会显示 60 秒的预览 |
+| 思考与操作浮窗 | 默认打开，开关改了就生效。“锁定并穿透鼠标”默认打开，这时把光标停在浮窗右上角的锁上，就能临时解锁去拖动和缩放；点浮窗右上角 × 仅关闭当前预览或本轮窗口，不会关掉设置开关。更多选项里可以选浮窗内容（原文，即直接显示 DSH 的输出；或者 AI 总结），调背景不透明度、大小、位置和锁定快捷键。“打开浮窗并调整”会显示 60 秒的预览 |
 | 停止快捷键 | 点“录制快捷键”，按下想用的键（比如 F8 或 Ctrl + Alt + K），再保存。“恢复默认（Esc）”会清掉额外的快捷键 |
-| 预览 | 保存后点接管提示旁的“预览”，看看提示在你屏幕上的样子。每项的说明收在 ⓘ 图标里，鼠标停上去或点一下就能看到 |
+| 预览 | 点接管提示旁的“预览”即可保存接管提示设置并在屏幕上试看（表单里其他未保存的修改会保留）。每项的说明收在 ⓘ 图标里，鼠标停上去或点一下就能看到 |
 
 #### 5.2 随时按 Esc 停止
 
@@ -217,11 +230,12 @@ agent 每一步都按“观察 → 定位 → 执行 → 确认”来做，开�
 #### 5.4 使用须知
 
 - 能在后台操作控件时，插件会优先这样做，不动鼠标、不抢前台。按坐标点击、粘贴文字和按键还是要用真实的鼠标键盘：插件先把目标窗口提到前面，点击前检查落点没有被别的窗口挡住，做完把鼠标放回原处、把前台还给你原来的窗口。动作打开了菜单、下拉列表或对话框时，窗口留在前面；你中途换了窗口或移了鼠标，插件不再改回去。这几步进行时最好别同时动鼠标键盘。
-- 前台还给你之后，不指定窗口的后续操作和截图仍对准 agent 刚操作的那个窗口，不会打进或读你正在用的窗口。DSH 粘贴的文字不进剪贴板历史（Win+V），粘贴后恢复你原来的剪贴板。
+- 前台还给你之后，不指定窗口的后续操作和截图仍对准 agent 刚操作的那个窗口，不会打进或读你正在用的窗口。DSH 粘贴的文字不进剪贴板历史（Win+V）。记事本、写字板这类原生输入框直接粘贴，粘完就恢复你原来的剪贴板；其他程序要等它把文字读走以后才恢复，一直没来读，这次的文字就留在剪贴板上，结果里会注明，以免慢一点的程序粘进你原来的内容。
 - 同一时间只有一段对话能操作桌面，其他对话会收到“忙碌”的结果。
+- 这几类操作，DSH 会先弹窗问你，同意后才执行：带参数启动程序、通过快捷方式启动程序、在网页里打开本机文件、把本机文件上传到网页、连接你自己已打开的浏览器、第一次操作你自己浏览器里的标签页。同意只对这一次、这组参数有效；拒绝或取消就不执行。agent 不能操作 DSH 自己的窗口，所以也没法替你点“同意”。在 DSH 的“完全权限”方案下（不弹审批），这几类操作不再询问、直接执行，因为这时 DSH 本来就允许 agent 不经确认运行任何命令；“工作区内修改”“仅可查看”等方案照常先问你。单独运行的 MCP 服务没有这个确认框，这几类操作默认拒绝，可以用环境变量放开，见[安全说明](docs/wiki/safety.md)。
 - 在 DSH 里，截图以 PNG 文件路径交给 agent，图片数据不进对话，多截几张也不会撑满上下文。要把截图发到 IM，就让 IM 工具按这个路径发送文件。
 - 已经发给程序的操作无法撤回。如果程序卡住了，要等它响应后才能停下来。
-- 切换方案时，你的自定义清单会保留。保存的改动在当前这一步操作结束后生效，重启后也还在。agent 不能打开你关掉的工具。
+- 从别的方案切到“自定义”时，清单默认全部勾选，取消勾选不需要的工具后点“保存”才生效；已经保存为“自定义”的，页面显示你保存的清单。保存的改动在当前这一步操作结束后生效，重启后也还在。agent 不能打开你关掉的工具。
 
 完整说明见[设置与停止](docs/computer-use-settings.md)。
 
@@ -269,7 +283,9 @@ agent 每一步都按“观察 → 定位 → 执行 → 确认”来做，开�
 
 #### 7.3 使用建议
 
-能用 UIA 找到控件时，用 `invoke` / `set_value` 直接操作，它们在后台完成；`invoke` 的 `action` 还能展开、折叠控件，或把它滚到可见处，`scroll` 给元素 ID 时也先在后台滚动。UIA 找不到，或者只找到很少的控件时，用 OCR 读屏幕上的文字；图标和布局交给能看图的模型读截图。OCR 只返回文字和屏幕坐标，不会编造控件 ID。窗口移动或控件变化后，要重新观察。
+能用 UIA 找到控件时，用 `invoke` / `set_value` 直接操作，它们在后台完成；`invoke` 的 `action` 还能展开、折叠控件，或把它滚到可见处，`scroll` 给元素 ID 时也先在后台滚动。Excel 功能区这类连续按键（比如依次按 Alt、H、O、W 打开“列宽”），用一次 `keypress` 加 `thenKeys` 发完，中间不会把前台还回去。UIA 找不到，或者只找到很少的控件时，用 OCR 读屏幕上的文字；图标和布局交给能看图的模型读截图。OCR 只返回文字和屏幕坐标，不会编造控件 ID。窗口移动或控件变化后，要重新观察。
+
+先 `set_value` 再在同一个框里按 Enter（比如搜索框、地址栏）时，不带窗口目标的 `keypress` 会发到 DSH 这一轮刚操作过的窗口。`set_value` 会不会把焦点移进这个框，要看程序：Chromium 会，Win32 编辑框不会，所以先 `focus` 这个框最稳。按键和输入的结果里有 `deliveredTo`，写明键实际到了哪个窗口、哪个控件；这一轮还没操作过窗口又没给目标时，键会落到前台窗口，结果标为 `unconfirmed`。`list_windows` 也列出最小化的窗口（`minimized: true`），窗口数超过 `maxWindows` 时标 `truncated`。`activate_window` 会先恢复最小化的窗口，结果里标 `restored: true`，`window` 是调用之后的窗口。最小化的窗口截图只能拍到标题栏那一小条，结果会标 `minimized: true`，提示先恢复它。`ocr` 带 `query` 时只返回命中的那几行，不再附上全部文字和每个词的坐标。
 
 Electron 程序、Chrome 和 Edge 都用 Chromium 内核。这类程序要等有程序来读网页，才会生成网页里的控件。所以插件第一次读这类窗口时，会先替它打开网页的控件树，一般不到半秒就能读到网页里的按钮和输入框。结果里的 `webContent` 说明网页是否就绪；如果显示 `starting`，稍等再读一次。
 
@@ -285,11 +301,22 @@ Electron 程序、Chrome 和 Edge 都用 Chromium 内核。这类程序要等有
 
 浏览器有三种来源：
 
-- **agent 浏览器（默认）**：第一次用 `new-tab` 时，插件在后台创建一个可见但不抢前台的浏览器窗口。用哪个浏览器可以在设置里选，默认跟随 Windows 的默认浏览器；默认浏览器不是 Edge 或 Chrome 时，用已安装的 Chrome 或 Edge；也可以选 Firefox 系，这是实验功能，在后台运行，见 [Firefox 系浏览器](docs/browser-bidi.md)。它每次都从新的临时配置开始，标签页放在单独的隔离环境里，看不到你的 Cookie、登录状态和浏览记录。插件进程退出时它跟着退出，空闲 10 分钟也会自己关掉。如果用的是 Edge，Edge 会自动把这个临时配置登录到 Windows 的微软账户；agent 的标签页留在隔离环境里，用不到这个登录状态，窗口上也不显示账户；临时配置在浏览器关闭后删除。在设置里关掉“显示 DSH 浏览器窗口”，它就在后台运行，没有窗口。浏览器操控不显示屏幕边缘和鼠标标签。
-- **保留网站登录状态**：需要登录的任务，可以在设置里打开“保留网站登录状态”，默认关闭。打开后，DSH 专用浏览器不再每次用临时配置，而是给每个浏览器保留一个配置（`%LOCALAPPDATA%\dsh-computer-use-win\agent-browser` 下的 `kept-edge`、`kept-chrome`）：你在它的窗口（蓝框）里登录过的网站，之后的任务里还是登录状态，没勾“记住我”的网站也一样。第一次用到要登录的网站时，agent 会请你在这个窗口里登录一次，密码和验证码由你自己输入。你自己的浏览器始终不碰，不用开远程调试，也不会弹出允许提示。用 Edge 时，Edge 会自动用 Windows 上的微软账户登录这个配置，微软自家的网站直接是登录状态；不想这样就选 Chrome。关掉开关后登录仍然保留；要全部清除，退出 DSH 后删除上面的文件夹。风险：DSH 会以你的身份操作你在这里登录过的网站；网页上的文字可能诱导 agent；DSH 浏览器开着时，本机其他程序也能通过它的调试端口连上它。
-- **操作已打开的浏览器（实验性）**：默认关闭。打开后，`list_windows` 只读取浏览器写下的 `DevToolsActivePort` 文件，把你的浏览器列为“可以连接”，并给出 `"<浏览器 ID>:connect"` 入口，这时既不连接，也不会弹出提示。agent 会先请你准备在浏览器里点“允许”，再用 `set_value` 往这个入口写 `connect`，浏览器这时才问你是否允许。被拒绝或超时就停下，不自动重试，列表里会标出“未获允许”或“已超时”，所以提示不会叠在一起。连上以后，你自己标签页的网址会去掉 `?` 后面的参数和 `#` 片段；agent 只操作你提到的标签页和它自己打开的标签页，发送、购买、删除或改账户设置之前会先问你。断开时只断开连接，不关你的浏览器。连接期间，浏览器顶部会显示受自动测试软件控制的提示。
+- **agent 浏览器（默认）**：第一次用 `new-tab` 时，插件在后台创建一个可见但不抢前台的浏览器窗口。用哪个浏览器可以在设置里选，默认跟随 Windows 的默认浏览器；默认浏览器不是 Edge 或 Chrome 时，用已安装的 Chrome 或 Edge；也可以选 Firefox 系，这是实验功能，在后台运行，见 [Firefox 系浏览器](docs/browser-bidi.md)。它每次都从新的临时配置开始，标签页放在单独的隔离环境里，看不到你的 Cookie、登录状态和浏览记录。插件进程退出时它跟着退出，无头模式空闲 10 分钟、可见窗口空闲 2 小时后会自动关闭；导航、标题变化和对话框也计入活动。如果用的是 Edge，Edge 会自动把这个临时配置登录到 Windows 的微软账户；agent 的标签页留在隔离环境里，用不到这个登录状态，窗口上也不显示账户；临时配置在浏览器关闭后删除。在设置里关掉“显示 DSH 浏览器窗口”，它就在后台运行，没有窗口。浏览器操控不显示屏幕边缘和鼠标标签。
+- **保留网站登录**：需要登录的任务，可以在设置里打开“保留网站登录”，默认关闭。打开后，DSH 专用浏览器不再每次用临时配置，而是给每个浏览器保留一个配置（`%LOCALAPPDATA%\dsh-computer-use-win\agent-browser` 下的 `kept-edge`、`kept-chrome`）：你在它的窗口（蓝框）里登录过的网站，之后的任务里还是登录状态，没勾“记住我”的网站也一样。第一次用到要登录的网站时，agent 会请你在这个窗口里登录一次，密码和验证码由你自己输入。你自己的浏览器始终不碰，不用开远程调试，也不会弹出允许提示。用 Edge 时，Edge 会自动用 Windows 上的微软账户登录这个配置，微软自家的网站直接是登录状态；不想这样就选 Chrome。关掉开关后登录仍然保留；要全部清除，退出 DSH 后删除上面的文件夹。风险：DSH 会以你的身份操作你在这里登录过的网站；网页上的文字可能诱导 agent；0.6.0 通过命名管道通信，不开启本地调试端口，但登录保存在该配置文件夹中，同账户下的本机其他程序仍可读取使用。
+- **连接现有浏览器（实验）**：默认关闭。打开后，`list_windows` 只读取浏览器写下的 `DevToolsActivePort` 文件，把你的浏览器列为“可以连接”，并给出 `"<浏览器 ID>:connect"` 入口，这时既不连接，也不会弹出提示。agent 会先请你准备在浏览器里点“允许”，再用 `set_value` 往这个入口写 `connect`，浏览器这时才问你是否允许。被拒绝或超时就停下，不自动重试，列表里会标出“未获允许”或“已超时”，所以提示不会叠在一起。连上以后，你自己标签页的网址会去掉 `?` 后面的参数和 `#` 片段；agent 只操作你提到的标签页和它自己打开的标签页，发送、购买、删除或改账户设置之前会先问你。断开时只断开连接，不关你的浏览器。连接期间，浏览器顶部会显示受自动测试软件控制的提示。
 
-浏览器通道还读不到 iframe 里的内容，遇到时 agent 会改用电脑操控，通过 UIA 读取和操作。显示浏览器窗口时，Chrome 自己的 JavaScript 弹窗（alert、confirm 这类）有时会短暂切到前台。Ctrl+L、Ctrl+T 这类快捷键属于浏览器窗口，网页内部收不到，请改用 `address`、`new-tab` 和 `close_window`。环境变量和返回格式见 [MCP 工具文档](docs/wiki/mcp-tools.md#browser-lane)。
+Chromium 浏览器通道支持同源、跨源和嵌套 iframe；元素 ID 绑定 frame 与文档，导航或卸载后失效。传入 browserTab 时，坐标使用当前页面截图的 CSS 视口像素，可操作 canvas；不会移动桌面鼠标。显示浏览器窗口时，Chrome 自己的 JavaScript 弹窗（alert、confirm 这类）有时会短暂切到前台。Ctrl+L、Ctrl+T 这类快捷键属于浏览器窗口，网页内部收不到，请改用 `address`、`new-tab` 和 `close_window`。环境变量和返回格式见 [MCP 工具文档](docs/wiki/mcp-tools.md#browser-lane)。
+
+#### 7.5 少读一点，省上下文
+
+- **精简树。** Windows 界面上的 `accessibility_tree` 和 `snapshot` 支持 `detailLevel:"summary"`，每个节点只保留 ID、控件类型、名称和状态。
+- **给树设字节预算。** 这两个工具的 `maxBytes` 最小为 2,000，限制返回的 UTF-8 JSON 大小，截图另算。超出时先转为精简树，再只留可操作控件和它们的祖先，最后按层截断。截断时从 `budget.fullResultPath` 读取完整结果。如果剩余内容仍放不下，结果会给出文件路径。
+- **重读时只要变化。** 用 `accessibility_tree` 传 `treeDeltaBase:"start"` 取得树和 `treeId`。重读同一目标时，把这个 ID 传给 `treeDeltaBase`，就会收到新增、删除和变化的控件，以及新的 `treeId`。要比较控件的值，用 `detailLevel:"full"`。找不到基准、窗口或视图参数变了、任一树被截断，或变化超过 40% 时，会退回树结果并说明 `delta.fallback` 的原因。增量本身超出 `maxBytes` 也会回退，再按预算缩减。预算缩减后的树不能作为增量基准。
+- **给 OCR 设预算。** `ocr` 的 `maxBytes` 同样从 2,000 起。超出时先省掉逐词坐标，再省掉与逐行结果重复的合并文本，最后从末尾截行。截断或仅返回文件时，`budget.fullResultPath` 指向完整结果。
+
+Windows UI Automation 的树与快照在顶层返回 `countedDepth`（计入 `maxDepth` 的最大层数）和 `structuralDepth`（从根算起的最大实际层数），两个数描述的是后端读到的那棵树，也就是精简、截断或算增量之前的树。
+
+只想确认某个控件有没有变化，用 `find` 定点查找，或用 `wait_for` 等待目标状态。参数与返回值见 [MCP 工具说明](docs/wiki/mcp-tools.md#accessibility_tree)。
 
 ### 8. 常见问题
 
@@ -305,7 +332,7 @@ Electron 程序、Chrome 和 Edge 都用 Chromium 内核。这类程序要等有
 
 #### 8.2 为什么点击或输入没有反应？
 
-先看目标窗口有没有被挡住、程序是不是卡住了。按坐标点击时，落点露出的是别的窗口（比如通知）就不会点下去，结果会说出挡住它的窗口（`POINT_COVERED`）；结果里的 `foreground` 和 `pointer` 说明这一步有没有借用前台、有没有还回去。Chromium、Electron 和部分 WinUI 程序会忽略后台输入，所以优先用 UIA 操作，或者先把目标窗口切到前台再输入，然后看看实际效果。以管理员身份运行的窗口和 UAC 确认界面受 Windows 权限保护，插件无法操作。插件还需要一个正常可用的桌面会话。
+先看目标窗口有没有被挡住、程序是不是卡住了。按坐标点击时，落点露出的是别的窗口（比如通知）就不会点下去，结果会说出挡住它的窗口（`POINT_COVERED`）；结果里的 `foreground` 和 `pointer` 说明这一步有没有借用前台、有没有还回去。Chromium、Electron 和部分 WinUI 程序会忽略后台输入，所以优先用 UIA 操作，或者先把目标窗口切到前台再输入，然后看看实际效果。当目标窗口的 Windows 完整性级别高于插件输入进程时，插件会拒绝操作并返回 `ELEVATED_TARGET_DENIED`。无法核验目标时会返回 `INPUT_TARGET_ACCESS_UNCONFIRMED`。UAC 确认仍由用户自行操作。插件还需要一个正常可用的桌面会话。
 
 #### 8.3 支持 PowerShell 7、其他系统，或者自带看图模型吗？
 
@@ -313,11 +340,23 @@ Electron 程序、Chrome 和 Edge 都用 Chromium 内核。这类程序要等有
 
 插件只提供桌面工具，不带模型、API key，也不带 OmniParser、UI-TARS 这类看图解析工具。能看图的模型或单独的解析服务可以读截图，再把位置交给插件去操作。
 
+#### 8.4 遇到问题怎么反馈？
+
+在 **设置 → 电脑操控** 标题右侧点“反馈问题”。插件会把 `wincu-diagnostics-日期-时间.txt` 存到下载文件夹，在资源管理器里选中它，并用系统默认浏览器打开 GitHub 新建问题页面。页面同时提示文件名和保存位置。下载文件夹写不进去时，会弹出“另存诊断文件”，让你另选位置。
+
+在 GitHub 写下怎样复现、预期结果和实际结果。查看 TXT 后，把它拖到问题描述框再提交。
+
+TXT 包含插件版本与安装来源、DSH 与运行环境、Windows、PowerShell、屏幕与浏览器信息、相关设置、自检状态、最近 30 次电脑操控调用，以及最多 200 行插件相关日志。工具输入文字只保留长度；截图可在遮盖私人信息后单独附上。
+
 ### 9. 数据与隐私
 
 界面读取、文字识别、截图和输入都在你的电脑上完成，结果交给 DSH 或其他调用方。这些内容会不会再发给远程模型，取决于你的 DSH 和模型设置。截图和读出的文字可能包含窗口里的敏感信息，所以分享日志或提 Issue 之前，请先遮住账号、路径、密码和私人对话。
 
-浏览器通道读到的网页内容同样在本机处理，再交给调用方。agent 浏览器默认不带任何登录；打开“保留网站登录状态”后，agent 能读取和操作你在 DSH 浏览器里登录过的网站。打开“操作已打开的浏览器”并允许连接后，agent 能读取和操作那个浏览器里所有已登录的网站，所以只在需要时打开，用完可以在浏览器里关掉远程调试。网页里的文字也可能夹带写给 agent 的指令，所以页面大纲的开头会提醒模型：网页内容不可信，只听你的指示。
+浏览器通道读到的网页内容同样在本机处理，再交给调用方。agent 浏览器默认不带任何登录；打开“保留网站登录”后，agent 能读取和操作你在 DSH 浏览器里登录过的网站。打开“连接现有浏览器”并允许连接后，agent 能读取和操作那个浏览器里所有已登录的网站，所以只在需要时打开，用完可以在浏览器里关掉远程调试。网页里的文字也可能夹带写给 agent 的指令，所以页面大纲的开头会提醒模型：网页内容不可信，只听你的指示。
+
+设置页直接向 npm（registry.npmjs.org）查询插件的 `latest`，并在本机读取 DSH 插件市场的安装状态。npm 查询只用插件名。
+
+“反馈问题”导出的诊断文件只存在你的电脑上，你把它拖进问题页面才会上传，内容见 8.4。
 
 ### 10. 文档与开发
 
@@ -334,7 +373,7 @@ npm ci
 npm test
 ```
 
-单独运行的 MCP 服务不依赖任何第三方包；接入 DSH 时，用的是 DSH 自带的 Schemastery 和官方 MCP 桥。开发依赖只用于测试。`npm test` 会运行 **54 套互相隔离的回归测试**，覆盖设置兼容、接管与停止、思考与操作浮窗、界面读取、截图、文字识别协议、输入边界、批量动作和浏览器通道。它不会发出真实的键盘鼠标输入，也不会改动你装好的 DSH 配置；需要真实界面的测试只操作专用的测试窗口和临时的浏览器配置，日志写在命令输出的临时目录里。
+单独运行的 MCP 服务不依赖任何第三方包；接入 DSH 时，用的是 DSH 自带的 Schemastery 和官方 MCP 桥。开发依赖只用于测试。`npm test` 会运行 **88 套互相隔离的回归测试**，覆盖设置兼容、接管与停止、思考与操作浮窗、界面读取、截图、文字识别协议、输入边界、批量动作和浏览器通道。它不会发出真实的键盘鼠标输入，也不会改动你装好的 DSH 配置；需要真实界面的测试只操作专用的测试窗口和临时的浏览器配置，日志写在命令输出的临时目录里。
 
 `node test/notepad-e2e.mjs` 是另一项会真实打字的测试，它会打开记事本，请在专门的测试桌面上运行。
 
@@ -348,7 +387,7 @@ MIT 许可。本项目基于 [cgissing/windows-computer-use](https://github.com/
 
 ## English
 
-This plugin lets a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) agent see and use the real Windows apps and web pages on your computer. It can find buttons and text fields, read text on the screen, click, type, and switch or manage windows. Web pages are worked on in DSH's own browser in the background by default, without moving your pointer or taking the foreground.
+This plugin lets [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) see and use the real Windows apps and web pages on your computer. It can find buttons and text fields, read text on the screen, click, type, and switch or manage windows. Web pages are worked on in DSH's own browser in the background by default, without moving your pointer or taking the foreground.
 
 **Web pages in the background · An overlay shows what DSH is thinking and doing, step by step · 25 action tools + 1 management entry · Clear indicators when the mouse or keyboard is used · Press Esc to stop at any time · Chinese and English settings**
 
@@ -376,9 +415,13 @@ You need a Windows computer with DSH Desktop installed. The plugin uses Windows 
 
 #### 1.2 Upgrade
 
-Run the same install command, then fully quit and reopen DSH Desktop as in step 2 above.
+DSH checks npm’s `latest` at startup. The update button is at the top right of **Settings → Computer Use**, to the left of the GitHub link when the project note is folded. Click **Check for updates** to check again right away. The button changes to **Update** when a newer version is available. Click **Update** to have the plugin market install it. The current step and progress appear below the title. **Stop update** keeps your installed version if you click it before the market starts replacing files. New releases usually reach the market after npm. If the market hasn’t picked up a new release yet, the page waits for it to sync before installing. If updating from settings fails, the page links to the market’s **Installed** tab so you can try there. In the market’s **Download region** setting, **Global** downloads directly from npm and **China mainland** uses a mirror.
 
-The `desktop` in the command is the profile that DSH Desktop uses. If you install into another profile, the DSH you are using does not change.
+**Starting with 0.6.3**, a confirmation appears when installation finishes. **Restart now** quits DSH Desktop normally and opens it again. Choose **Later** to keep working. **Restart to finish** stays beside the title and lets you reopen the confirmation any time.
+
+**Upgrading from 0.6.1 or 0.6.2 to 0.6.3** uses the old settings page. Right-click the DSH icon in the taskbar tray, choose **Quit**, and open DSH Desktop again. Go straight to **Settings → Computer Use** and click **Update** before using computer use. If offered **Update anyway**, click it to continue. After installation, the settings page switches to the new version immediately, while DSH still runs the old version in the background. This upgrade has no restart confirmation. Choose **Quit** from the tray again, reopen DSH Desktop, and leave the Computer Use settings alone until it restarts. If the plugin is reported as removed, quit and reopen DSH Desktop, then reinstall it from the plugin market. Your previous settings are kept.
+
+You can also run the install command above, then quit from the tray and reopen DSH Desktop. Without the plugin market or with a local-file install, **Update** opens these instructions. `desktop` in the command is the profile DSH Desktop uses. Installing into another profile leaves the DSH you’re using unchanged.
 
 #### 1.3 Other ways to install
 
@@ -418,7 +461,7 @@ Run on its own, the server loads all tools by default. Set `WCU_TOOL_MODE=lite` 
 
 ### 2. Interface tour
 
-These are real screenshots from DSH Desktop 2.0.18, with the Chinese interface. Each image shows only the browser window, the conversation or the settings panel; click one to see it at full size. The settings screenshots come from 0.5.4. The browser screenshot comes from 0.5.2 and the conversation screenshots from an earlier search task; neither part of the interface has changed since. The overlay images replay the record of a real task through the plugin's own overlay code.
+These are real screenshots from DSH Desktop 2.0.18, with the Chinese interface. Each image shows only the browser window, the conversation or the settings panel; click one to see it at full size. The settings overview comes from 0.6.1 and the other settings screenshots from 0.6.0. The browser screenshot comes from 0.5.2 and the conversation screenshots from an earlier search task; neither part of the interface has changed since. The overlay images replay the record of a real task through the plugin's own overlay code.
 
 #### 2.1 Web pages are worked on in the DSH browser
 
@@ -434,34 +477,40 @@ Each desktop action is a row with a mouse icon, such as “Entered text”, “S
 
 #### 2.3 Reasoning and progress overlay
 
-While DSH works on the computer, a translucent overlay in a corner of the screen shows what it is thinking and doing, step by step. Each step gets a heading with its action, followed by the reasoning for that step, the same text you see in the conversation. When the task ends, the heading shows that it is done, with the number of steps and the time taken, and the overlay shows the reply from its start for another 20 seconds. So you never have to bring the DSH window to the front to check on progress, which would interrupt the work. The overlay, the indicator bar and the AI summary use the DSH interface language: the language chosen in DSH, or the system's when none is chosen. Languages other than Chinese show English for now.
+While DSH works on the computer, a translucent overlay in a corner of the screen shows what it is thinking and doing, step by step. Each step gets a heading with its action, followed by the reasoning for that step, the same text you see in the conversation. When the task ends, the heading shows that it is done, with the number of steps and the time taken, and the overlay shows the reply from its start for another 20 seconds. So you never have to bring the DSH window to the front to check on progress, which would interrupt the work. The overlay, the indicator bar and the AI summary use the DSH interface language: the language chosen in DSH, or the system's when none is chosen. Chinese, English and Russian are available for the overlay, indicator and AI summary. Other languages show English. The settings page still uses English for Russian.
 
 ![Two frames of the progress overlay, redrawn by the plugin's overlay code from the record of a real task (open a browser, search for 晴天 and scroll to the end). Left, during the task: the heading reads DSH · step 3 · acting, the subheading reads run 7 actions: scroll the page, wait, and below it is the model's reasoning for that step, in English. Right, after the task: the heading reads DSH · done · 10 steps · 41 s, followed by the start of the reply. Both overlays have the padlock button in the top-right corner](assets/desktop-progress-overlay-hd.png)
 
-The overlay is locked by default, so the mouse passes through it and it never blocks a click by you or by DSH. To move or resize it, rest the pointer on the padlock in its top-right corner: the overlay unlocks for a moment, you can drag the title or the edges, and it locks again after the pointer leaves. Only your own mouse unlocks it, never the pointer DSH moves. By default the overlay shows DSH's own output and costs no extra tokens. You can switch it to AI summary in the settings; the conversation's model then writes a sentence or two about the progress every so often, which uses extra tokens.
+The overlay is locked by default, so the mouse passes through it and it never blocks a click by you or by DSH. To move or resize it, rest the pointer on the padlock in its top-right corner: the overlay unlocks for a moment, you can drag the title or the edges, and it locks again after the pointer leaves. Only your mouse unlocks it, including a mouse you use through a remote-control tool such as UU Remote; the pointer DSH moves never does. By default the overlay shows DSH's own output and costs no extra tokens. You can switch it to AI summary in the settings; the conversation's model then writes a sentence or two about the progress every so often, which uses extra tokens.
 
 #### 2.4 Settings page
 
-The settings are under Computer Use, the tab with the mouse icon on the left (电脑操控 in the Chinese interface). Web and browser comes first: Prefer web page controls, Show the DSH browser window, Browser type, Keep website sign-ins, and the off-by-default Use an already open browser (experimental). Below it, pick how tools are loaded: All, Lite, Lazy or Custom. All (26 tools) is the default. Further down are the takeover indicator, the reasoning and progress overlay, and stopping. The small picture to the left of each item follows its setting, and the explanations sit behind ⓘ icons. Collapse folds the Star and Issue note at the top into a single link, as in the screenshot, and Expand brings it back.
+Open **Computer Use**, the mouse-icon tab on the left (电脑操控 in the Chinese interface). The plugin version is beside the title, with **Check for updates** or **Update** and **Report a problem** on the right. **Work mode** offers **Low disruption** (the default), **Foreground**, and **Virtual machine**. Low disruption works in the background where possible. Its **More details** section starts collapsed. Foreground uses the mouse and keyboard directly. Virtual machine mode works inside a configured Hyper-V VM.
 
-![The settings page: the mouse-icon tab on the left (电脑操控 in the Chinese interface) and the folded project link at the top; the Web and browser group with Prefer web page controls, Show the DSH browser window, Browser type, Keep website sign-ins and Use an already open browser (experimental), each with a small picture on its left; below it the Tools group showing 26 of 26 enabled and the All, Lite, Lazy and Custom presets](assets/desktop-settings-overview-hd.png)
+The page also lets you choose which tools load and adjust browser options, the takeover indicator, the reasoning and progress overlay, and the stop shortcut. The small illustration beside each setting reflects your selection. Open the ⓘ icon for an explanation. Folding the Star and Issue note leaves a GitHub link and an expand arrow. Your choice survives upgrades.
+
+*The screenshot below is from v0.6.1. Work mode and Check for updates had yet to be added. Update appeared only when a newer version was available.*
+
+![Computer Use settings in v0.6.1, showing the expanded project note, Report a problem button, and tools and browser settings](assets/desktop-settings-overview-hd.png)
 
 #### 2.5 More screenshots
 
 <details>
 <summary>Task summary, custom tools, overlay settings, control indicators, stop settings</summary>
 
+*The Custom tools, overlay, control indicator and stop settings screenshots below are from v0.6.0.*
+
 **Task summary.** When a turn ends, the agent explains what it did and what it confirmed on the results page. The text in this image was written by the model used for the task.
 
 ![Actual conversation summary after searching for 晴天: a new Edge window, the search query and confirmation that 周杰伦 appeared in the results](assets/desktop-search-result-hd.png)
 
-**Custom tools.** Choosing Custom opens the tool list. Tick tools one by one, or a whole group at once. This is an unsaved demo that was discarded after the screenshot.
+**Custom tools.** Choosing Custom opens the tool list with every tool checked; untick tools one by one or a whole group at once, then save. This is an unsaved demo that was discarded after the screenshot.
 
-![Part of the expanded Custom checklist, with groups, select-all, disable-all and group selection](assets/desktop-settings-tools-custom-hd.png)
+![The tool list opened by choosing Custom: every tool checked by default, 26 of 26 enabled, with select-all, disable-all and group checkboxes](assets/desktop-settings-tools-custom-hd.png)
 
-**Overlay settings.** The two switches, Show reasoning and progress overlay and Lock and pass through mouse, apply as soon as you change them. Under More options you choose the overlay content: DSH's own output by default, or AI summary, which uses extra tokens. Further down are the background opacity, size, position and the lock shortcut. Open overlay to adjust shows a 60-second preview, so you can drag the overlay where you want it.
+**Overlay settings.** The two switches, Show reasoning and progress overlay and Lock and pass through mouse, apply as soon as you change them. Under More options you choose the overlay content: Source (DSH's own reasoning and output) by default, or AI summary, which uses extra tokens. Further down are the background opacity, size, position and the lock shortcut. Open overlay to adjust shows a 60-second preview, so you can drag the overlay where you want it.
 
-![Overlay settings: the Show reasoning and progress overlay and Lock and pass through mouse switches, each with a small picture, and the Open overlay to adjust button at the top right; More options is open with a description, the overlay content (DSH output) and the background opacity (60)](assets/desktop-settings-overlay-hd.png)
+![Overlay settings: the Show reasoning and progress overlay and Lock and pass through mouse switches, each with a small picture, and, at the top right, the Saves instantly note and the Open overlay to adjust button; More options is open with a one-line note (dragging or resizing saves; close it with × when done), the overlay content set to Source (default) and the background opacity at 60](assets/desktop-settings-overlay-hd.png)
 
 **Control indicators.** While the agent uses the mouse or keyboard on the desktop, a blue glow lines the screen edges, a “DSH is controlling your computer” bar appears at the top or bottom (in Chinese when DSH is set to Chinese), and a DSH tag follows the pointer. The screen and pointer indicators have their own switches, and Preview shows them on your screen. Placement, text, how long they stay and remote visibility are under More options.
 
@@ -505,7 +554,7 @@ The plugin keeps two kinds of result apart. Input actions only report “sent”
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/architecture-en-dark.png">
-  <img alt="Architecture. You ask for tasks and change settings in DSH, and press Esc to stop. Inside DSH are the agent, the plugin adapter mcp/dsh-plugin.mjs (passes your settings on, tracks turns and hands the conversation’s reasoning and steps to the overlay), the settings page and step records mcp/client.js, and the official MCP bridge. The bridge talks MCP over stdio to the MCP server mcp/server.mjs, which offers tools by preset (All 26, Lite 12, Lazy 1, Custom), checks arguments and hands each call to one of two lanes. Browser Use: calls with browserTab or a page element ID go to the browser lane mcp/browser.mjs inside the server, which reads and acts inside pages over the Chrome DevTools Protocol (CDP), with no pointer, no foreground change and no takeover indicator. It drives the DSH browser (by default the Windows default browser with a fresh temporary profile each time, or one kept profile with Keep website sign-ins on); with the experimental Use an already open browser on and Allow clicked in that browser, it also works in your own open Chrome or Edge. Computer Use: all other calls go one at a time to the long-running PowerShell backend scripts/windows-uia.ps1, which works on your Windows desktop through UI Automation, mouse and keyboard, windows, capture and text recognition; the browser toolbar and page content the browser lane cannot read are handled here too. The takeover helper scripts/windows-takeover.ps1 is a separate process: it shows the screen indicators when Computer Use needs the mouse or keyboard, draws the reasoning and progress overlay step by step, and listens for Esc itself, not through DSH." src="assets/diagrams/architecture-en-light.png">
+  <img alt="Architecture. You ask for tasks and change settings in DSH, and press Esc to stop. Inside DSH are the agent loop, the plugin adapter mcp/dsh-plugin.mjs (passes your settings on, tracks turns and hands the conversation’s reasoning and steps to the overlay), the settings page and step records mcp/client.js, and the official MCP bridge. The bridge talks MCP over stdio to the MCP server mcp/server.mjs, which offers tools by preset (All 26, Lite 12, Lazy 1, Custom), checks arguments and hands each call to one of two lanes. Browser Use: calls with browserTab or a page element ID go to the browser lane mcp/browser.mjs inside the server, which reads and acts inside pages over the Chrome DevTools Protocol (CDP), with no pointer, no foreground change and no takeover indicator. It drives the DSH browser (by default the Windows default browser with a fresh temporary profile each time, or one kept profile with Keep website sign-ins on); with the experimental Connect browser on and Allow clicked in that browser, it also works in your own open Chrome or Edge. Computer Use: all other calls go one at a time to the long-running PowerShell backend scripts/windows-uia.ps1, which works on your Windows desktop through UI Automation, mouse and keyboard, windows, capture and text recognition; the browser toolbar and page content the browser lane cannot read are handled here too. The takeover helper scripts/windows-takeover.ps1 is a separate process: it shows the screen indicators when Computer Use needs the mouse or keyboard, draws the reasoning and progress overlay step by step, and listens for Esc itself, not through DSH." src="assets/diagrams/architecture-en-light.png">
 </picture>
 
 The blue parts are this plugin's code, and the grey parts come from DSH, Windows or the browser. Here is what each part does:
@@ -527,18 +576,21 @@ Change these in **Settings → Computer Use**. Most take effect after you click 
 
 | Setting | Your choices |
 |---|---|
+| Update | The button left of the GitHub link at the top right: Check for updates, or Update when a newer version exists, which installs it only when clicked; see 1.2 |
+| Report a problem | Saves a TXT to Downloads and opens GitHub’s new-issue page; see 8.4 |
+| Tool loading | **All** (26 tools, the default); **Lite** (12 common tools); **Lazy** (starts with 1 management tool and loads the rest when needed, with all tools allowed); **Custom** (pick tools one by one or by group) |
+| Work mode | **Low disruption** (the default): keep using your PC and the task keeps going. DSH does what it can in the background and opens the apps it starts on a hidden desktop; steps that need the mouse and keyboard run at once and borrow them briefly, while what you type or click meanwhile is held and then replayed to your window; it waits only while you hold a key, have input-method text not yet committed, or use a full-screen app; **Foreground**: for when you step away; DSH keeps its window in front and uses the mouse and keyboard directly, and Esc stops it; **Virtual machine**: works inside a Hyper-V virtual machine and never touches your PC, with one-time setup steps on the settings page. See [settings and stopping](docs/computer-use-settings.md) |
 | Prefer web page controls | On by default. Pages it can read and operate directly are handled in the background, without moving the pointer or taking the foreground; desktop apps and page content it cannot read go to Computer Use |
 | Show the DSH browser window | On by default, so you can watch the DSH browser; turn it off to run the browser in the background with no window |
 | Browser type | Follows the Windows default browser, or choose Edge, Chrome or the Firefox family (experimental); when the default is neither Edge nor Chrome, an installed Chrome or Edge is used. The Firefox family starts with the Windows default one; see [Firefox-family browsers](docs/browser-bidi.md) |
 | Keep website sign-ins | Off by default. When on, the DSH browser keeps one profile, and sites you sign in to in its window are still signed in next time; nothing to set up in your own browser and no prompts to allow. The settings page says how to sign in, where the sign-ins are kept and the risks; see 7.4 |
-| Use an already open browser (experimental) | Off by default. When on, the agent can work in the Chrome or Edge you already have open. First allow remote debugging at `chrome://inspect/#remote-debugging` (or `edge://inspect/#remote-debugging`); after that the browser asks you every time it is connected. Only the browser chosen under Browser type is used, and Default means the Windows default browser; it is unavailable for the Firefox family. See 7.4 |
-| Tool loading | **All** (26 tools, the default); **Lite** (12 common tools); **Lazy** (starts with 1 management tool and loads the rest when needed, with all tools allowed); **Custom** (pick tools one by one or by group) |
+| Connect browser (experimental) | Off by default. When on, the agent can work in the Chrome or Edge you already have open. First allow remote debugging at `chrome://inspect/#remote-debugging` (or `edge://inspect/#remote-debugging`); after that the browser asks you every time it is connected. Only the browser chosen under Browser type is used, and Default means the Windows default browser; it is unavailable for the Firefox family. See 7.4 |
 | Screen indicator | Turn the edge glow and the status bar on or off. Change the text, put the bar at the top or bottom, and choose how long it stays after a turn ends (0.2–3 seconds) |
 | Pointer indicator | Turn the glow and DSH tag at the pointer on or off on their own. Your Windows pointer style is not changed, and the tag stays clear of enlarged pointers |
 | Visible in remote sessions and recordings | On by default, so UU Remote, screen sharing and recordings can show the indicators and the reasoning and progress overlay too, including the model's reasoning and replies. It keeps up when you change monitors, layout or scaling |
-| Reasoning and progress overlay | On by default; the switches apply at once. Lock and pass through mouse is on by default, and resting the pointer on the overlay's padlock unlocks it for moving and resizing. More options holds the overlay content (DSH output or AI summary), the background opacity, size, position and the lock shortcut. Open overlay to adjust shows a 60-second preview |
+| Reasoning and progress overlay | On by default; the switches apply at once. Lock and pass through mouse is on by default, and resting the pointer on the overlay's padlock unlocks it for moving and resizing; clicking × on the overlay closes only the current preview or turn window without disabling the feature. More options holds the overlay content (Source or AI summary), the background opacity, size, position and the lock shortcut. Open overlay to adjust shows a 60-second preview |
 | Stop shortcut | Click Record shortcut, press the key you want (such as F8 or Ctrl + Alt + K), then save. Restore default (Esc) removes the extra shortcut |
-| Preview | After saving, click Preview next to the takeover indicator to see how it looks on your screen. Each setting's details sit behind an ⓘ icon; hover over it or click it to read them |
+| Preview | Click Preview next to the takeover indicator to apply indicator changes and see how they look on your screen (other unsaved draft changes remain untouched). Each setting's details sit behind an ⓘ icon; hover over it or click it to read them |
 
 #### 5.2 Press Esc to stop at any time
 
@@ -551,11 +603,12 @@ They appear the first time a turn uses the mouse or keyboard and stay on through
 #### 5.4 Good to know
 
 - The plugin operates controls in the background when it can, without moving the mouse or the foreground. Clicks at screen positions, pasting text and key presses still need the real mouse and keyboard: the plugin brings the target window forward, checks that no other window covers the click point, and afterwards puts the mouse back and returns the foreground to the window you had in front. If the action opened a menu, drop-down list or dialog, the window stays in front; if you switched windows or moved the mouse meanwhile, the plugin leaves them as you set them. Avoid using the mouse and keyboard during these steps.
-- After the foreground goes back to you, later actions and screenshots that name no window still aim at the window the agent was working in, never at the one you are using. Text DSH pastes stays out of your clipboard history (Win+V), and your clipboard is restored after the paste.
+- After the foreground goes back to you, later actions and screenshots that name no window still aim at the window the agent was working in, never at the one you are using. Text DSH pastes stays out of your clipboard history (Win+V). Native edit boxes such as Notepad and WordPad paste directly, and your clipboard comes back as soon as the paste is done. Other programs get your clipboard back only after they have read the text; if one never reads it, the text stays on the clipboard and the result says so, so a slow program never pastes your old content.
 - Only one conversation can use the desktop at a time. Others get a “busy” result.
+- DSH asks you first, and acts only after you agree, before it launches a program with arguments or through a shortcut, opens a local file in a page, uploads a local file to a page, connects to your own open browser, or acts for the first time on one of your own browser tabs. An approval covers that one call with those arguments; refusing or cancelling runs nothing. The agent cannot operate DSH's own windows, so it cannot click Allow for you. Under DSH's Full access preset, which shows no approval prompts, these calls run without asking, since that preset already lets the agent run any command unasked; Workspace Write, Read Only and the other presets ask first. The standalone MCP server has no such prompt and refuses these calls unless environment variables allow them; see [Safety](docs/wiki/safety.md).
 - Inside DSH, a screenshot reaches the agent as the path of a PNG file and the image data stays out of the conversation, so several screenshots no longer fill the context. To send a screenshot over IM, have the IM tool send that file.
 - An action already delivered to an app cannot be undone. If the app is stuck, stopping waits until it responds.
-- Switching presets keeps your custom list. Saved changes take effect after the current step finishes and survive a restart. The agent cannot turn on tools you have turned off.
+- Choosing Custom from another preset starts with every tool checked; uncheck the tools you do not want and save. A Custom selection you saved is shown as saved. Saved changes take effect after the current step finishes and survive a restart. The agent cannot turn on tools you have turned off.
 
 See [settings and stopping](docs/computer-use-settings.md) for the full details.
 
@@ -603,7 +656,9 @@ Through the `tools` entry, the agent can read a tool's description, and unload o
 
 #### 7.3 Tips
 
-When UIA can find a control, operate it directly with `invoke` or `set_value`; both run in the background. With `action`, `invoke` can also expand or collapse a control or scroll it into view, and `scroll` on an element ID scrolls in the background first. When UIA finds nothing, or very little, read the screen text with OCR, and let a model that can see images read the screenshot for icons and layout. OCR returns only text and screen positions; it never makes up control IDs. Look again after a window moves or a control changes.
+When UIA can find a control, operate it directly with `invoke` or `set_value`; both run in the background. With `action`, `invoke` can also expand or collapse a control or scroll it into view, and `scroll` on an element ID scrolls in the background first. Send an Excel Ribbon sequence such as Alt, H, O, W (Column Width) as one `keypress` with `thenKeys`, so the foreground is not handed back between the keys. When UIA finds nothing, or very little, read the screen text with OCR, and let a model that can see images read the screenshot for icons and layout. OCR returns only text and screen positions; it never makes up control IDs. Look again after a window moves or a control changes.
+
+To press Enter in a field after `set_value` (a search box, an address bar), note that a `keypress` without a window target goes to the window DSH last worked in this turn. Whether `set_value` moves the focus into the field depends on the app: Chromium does, a Win32 edit does not, so `focus` the field first to be sure. Key and typing results include `deliveredTo`, the window and control that actually got the input. When no window target was given and DSH has not worked in any window this turn, the input reaches the window in front and the result says `unconfirmed`. `list_windows` lists minimized windows too (`minimized: true`) and says `truncated` when there are more windows than `maxWindows`. `activate_window` restores a minimized window first; the result says `restored: true`, and `window` shows the window after the call. A screenshot of a minimized window gets only its title strip, so the result says `minimized: true` and to restore it first. `ocr` with a `query` returns only the matching lines, without the whole text and every word box.
 
 Electron apps, Chrome and Edge are all built on Chromium. Such an app builds the controls of a page only once another program reads the page. So the first time the plugin reads one of these windows, it turns the page's control tree on, and the page's buttons and input boxes usually become readable within half a second. `webContent` in the result tells you whether the page is ready. If it says `starting`, wait a moment and read again.
 
@@ -619,11 +674,22 @@ For web pages, the plugin does not have to read screenshots or move the mouse. I
 
 The browser comes from one of three places:
 
-- **The agent browser (default).** The first `new-tab` opens a visible browser window without bringing it to the front. Which browser is a setting: by default the Windows default browser, and an installed Chrome or Edge when that is neither; the Firefox family is an experimental choice that runs in the background (see [Firefox-family browsers](docs/browser-bidi.md)). It starts from a fresh temporary profile every time, and its tabs run in a separate isolated context, so they never see your cookies, sign-ins or history. It exits with the plugin process and closes itself after 10 idle minutes. Edge signs a new profile in to your Windows Microsoft account on its own; the agent's tabs stay in the isolated context and cannot use that sign-in, the window shows no account, and the temporary profile is deleted after the browser closes. Turn off Show the DSH browser window in settings to run it in the background with no window. Browser Use shows no screen edges or pointer tag.
-- **Keep website sign-ins.** For tasks that need you signed in, turn on Keep website sign-ins in the settings; it is off by default. The DSH browser then stops starting from a temporary profile and keeps one profile per browser (`kept-edge`, `kept-chrome` under `%LOCALAPPDATA%\dsh-computer-use-win\agent-browser`): sites you sign in to in its window (the blue frame) are still signed in for later tasks, also sites where you did not tick “remember me”. The first time a task needs a site that asks you to sign in, the agent asks you to sign in once in that window; you type passwords and codes yourself. Your own browser is never touched: no remote debugging to turn on and no prompts to allow. With Edge, Edge signs this profile in with the Microsoft account of your Windows, so Microsoft’s own sites are signed in already; choose Chrome to avoid that. Sign-ins stay when you turn the switch off; to remove them all, exit DSH and delete that folder. Risks: DSH acts as you on the sites you signed in to there; page text can try to steer the agent; and while the DSH browser runs, other programs on this computer can connect to it through its debugging port.
-- **Use an already open browser (experimental).** Off by default. When on, `list_windows` only reads the `DevToolsActivePort` file the browser writes, lists your browser as available and offers a `"<browser id>:connect"` handle; it neither connects nor shows a prompt. The agent first asks you to get ready to click Allow in the browser, then writes `connect` to that handle with `set_value`, and only then does the browser ask you. A refusal or timeout stops there with no automatic retry, and the listing says not allowed or timed out, so prompts never pile up. Once connected, tool results show the addresses of your own tabs without the part after `?` or `#`. The agent works only in tabs you mention or tabs it opened, and asks before sending, buying, deleting or changing account settings. Disconnecting leaves your browser running. While connected, the browser shows a bar saying it is controlled by automated test software.
+- **The agent browser (default).** The first `new-tab` opens a visible browser window without bringing it to the front. Which browser is a setting: by default the Windows default browser, and an installed Chrome or Edge when that is neither; the Firefox family is an experimental choice that runs in the background (see [Firefox-family browsers](docs/browser-bidi.md)). It starts from a fresh temporary profile every time, and its tabs run in a separate isolated context, so they never see your cookies, sign-ins or history. It exits with the plugin process and closes after 10 idle minutes headless or two hours visible; page activity also extends its lifetime. Edge signs a new profile in to your Windows Microsoft account on its own; the agent's tabs stay in the isolated context and cannot use that sign-in, the window shows no account, and the temporary profile is deleted after the browser closes. Turn off Show the DSH browser window in settings to run it in the background with no window. Browser Use shows no screen edges or pointer tag.
+- **Keep website sign-ins.** For tasks that need you signed in, turn on Keep website sign-ins in the settings; it is off by default. The DSH browser then stops starting from a temporary profile and keeps one profile per browser (`kept-edge`, `kept-chrome` under `%LOCALAPPDATA%\dsh-computer-use-win\agent-browser`): sites you sign in to in its window (the blue frame) are still signed in for later tasks, also sites where you did not tick “remember me”. The first time a task needs a site that asks you to sign in, the agent asks you to sign in once in that window; you type passwords and codes yourself. Your own browser is never touched: no remote debugging to turn on and no prompts to allow. With Edge, Edge signs this profile in with the Microsoft account of your Windows, so Microsoft’s own sites are signed in already; choose Chrome to avoid that. Sign-ins stay when you turn the switch off; to remove them all, exit DSH and delete that folder. Risks: DSH acts as you on the sites you signed in to there; page text can try to steer the agent; in 0.6.0, CDP uses a named pipe with no local debugging port, though sign-ins stay in that profile folder and remain readable by other programs under your Windows account.
+- **Connect browser (experimental).** Off by default. When on, `list_windows` only reads the `DevToolsActivePort` file the browser writes, lists your browser as available and offers a `"<browser id>:connect"` handle; it neither connects nor shows a prompt. The agent first asks you to get ready to click Allow in the browser, then writes `connect` to that handle with `set_value`, and only then does the browser ask you. A refusal or timeout stops there with no automatic retry, and the listing says not allowed or timed out, so prompts never pile up. Once connected, tool results show the addresses of your own tabs without the part after `?` or `#`. The agent works only in tabs you mention or tabs it opened, and asks before sending, buying, deleting or changing account settings. Disconnecting leaves your browser running. While connected, the browser shows a bar saying it is controlled by automated test software.
 
-The browser lane does not read content inside iframes yet; there the agent switches to Computer Use and reads and operates it through UIA. With the browser window shown, Chrome's own JavaScript dialogs (alert, confirm and the like) sometimes come to the front briefly. Shortcuts such as Ctrl+L and Ctrl+T belong to the browser window and never reach the page; use `address`, `new-tab` and `close_window` instead. Environment variables and result formats are in the [MCP tools reference](docs/wiki/mcp-tools.md#browser-lane).
+The Chromium lane reads and operates same-origin, cross-origin and nested iframes. Element ids bind their frame and document and expire on navigation/removal. With browserTab, coordinates use CSS pixels in the current page screenshot viewport, including canvas; the desktop pointer does not move. With the browser window shown, Chrome's own JavaScript dialogs (alert, confirm and the like) sometimes come to the front briefly. Shortcuts such as Ctrl+L and Ctrl+T belong to the browser window and never reach the page; use `address`, `new-tab` and `close_window` instead. Environment variables and result formats are in the [MCP tools reference](docs/wiki/mcp-tools.md#browser-lane).
+
+#### 7.5 Read less to save context
+
+- **Summarize a tree.** Use `detailLevel:"summary"` with `accessibility_tree` or `snapshot` on Windows controls. Each node keeps its ID, control type, name and states.
+- **Set a tree byte budget.** `maxBytes` starts at 2,000 and limits the UTF-8 JSON response. Screenshots are separate. Over the limit, the tool summarizes the tree first, then keeps actionable controls and their ancestors, then cuts the tree by level. If it cuts the tree, `budget.fullResultPath` points to the complete result. If the remaining content still cannot fit, the response gives the file path.
+- **Read just the changes.** Pass `treeDeltaBase:"start"` to `accessibility_tree` to get a tree and `treeId`. Pass that ID as `treeDeltaBase` when reading the same target again to get added, removed and changed controls and a new `treeId`. Use `detailLevel:"full"` to compare control values. A missing baseline, a different window or view settings, a truncated tree, or more than 40% of nodes changing falls back to a tree with the reason in `delta.fallback`. A delta over `maxBytes` also falls back to a tree reduced to fit the budget. A tree reduced by the budget cannot serve as a delta baseline.
+- **Set an OCR byte budget.** `ocr` also accepts `maxBytes` starting at 2,000. Over the limit, it drops word boxes first, then the combined text that repeats the lines, and finally lines from the end. If it cuts lines or returns only a file reference, `budget.fullResultPath` points to the complete result.
+
+Windows UI Automation trees and snapshots report `countedDepth` (the deepest level counted against `maxDepth`) and `structuralDepth` (the deepest actual level below the root) for the tree read by the backend before summarizing, trimming or computing a delta.
+
+To check whether one control changed, use `find` to locate it or `wait_for` to wait for the target state. See the [MCP tool reference](docs/wiki/mcp-tools.md#accessibility_tree) for arguments and results.
 
 ### 8. FAQ
 
@@ -639,7 +705,7 @@ When you report an issue, include the DSH Desktop, dsh core and plugin versions,
 
 #### 8.2 Why did a click or typed text have no effect?
 
-Check that the target window is not covered and still responds. A click at a screen position whose point shows another window, such as a notification, is not sent, and the result names the covering window (`POINT_COVERED`). The `foreground` and `pointer` fields of a result say whether the step borrowed the foreground and whether it gave it back. Chromium, Electron and some WinUI apps ignore input sent to background windows, so prefer UIA, or bring the window to the front before typing, and then look at the result. Windows protects apps running as administrator and the UAC prompt, so the plugin cannot operate them. The plugin also needs a normal, unlocked desktop session.
+Check that the target window is not covered and still responds. A click at a screen position whose point shows another window, such as a notification, is not sent, and the result names the covering window (`POINT_COVERED`). The `foreground` and `pointer` fields of a result say whether the step borrowed the foreground and whether it gave it back. Chromium, Electron and some WinUI apps ignore input sent to background windows, so prefer UIA, or bring the window to the front before typing, and then look at the result. A target with a higher Windows integrity level than the input worker is refused with `ELEVATED_TARGET_DENIED`. If Windows prevents verification of the target, the plugin reports `INPUT_TARGET_ACCESS_UNCONFIRMED`. Leave UAC prompts to the user. The plugin also needs a normal, unlocked desktop session.
 
 #### 8.3 What about PowerShell 7, other systems or a built-in vision model?
 
@@ -647,11 +713,23 @@ It works on Windows only. DSH can also run inside WSL (for example `dsh web` in 
 
 The plugin provides desktop tools only. It does not include a model, an API key, or image parsers such as OmniParser or UI-TARS. A model that can see images, or a separate parsing service, can read the screenshots and pass positions back to the tools.
 
+#### 8.4 How do I report a problem?
+
+Click Report a problem at the top right of **Settings → Computer Use**. DSH saves `wincu-diagnostics-date-time.txt` to Downloads, selects it in File Explorer, and opens GitHub’s new-issue page in your default browser. A dialog shows the file name and where it was saved. If Downloads cannot be written, a Save As dialog lets you choose another folder.
+
+Describe what happened, what you expected, and how to reproduce it. Review the TXT, then drag it into the issue description and submit.
+
+The TXT contains the plugin version and install source, DSH and runtime details, Windows, PowerShell, screen and browser information, relevant settings, self-test results, the last 30 computer-use calls, and up to 200 plugin log lines. Tool input text is kept as its length. You can attach a screenshot separately after covering private details.
+
 ### 9. Data and privacy
 
 Reading controls, text recognition, screenshots and input all run on your computer. The results go to DSH or another caller, and whether they are then sent to a remote model depends on your DSH and model settings. Screenshots and recognized text can include sensitive content from your windows, so hide accounts, paths, passwords and private chats before you share logs or open an issue.
 
-Pages read through the browser lane are also processed on your computer before they go to the caller. By default the agent browser carries no sign-ins; with Keep website sign-ins on, the agent can read and operate the sites you signed in to in the DSH browser. With Use an already open browser on and a connection allowed, the agent can read and operate every site signed in to in that browser, so turn it on only when needed, and you can turn remote debugging off in the browser afterwards. Page text can also carry instructions aimed at the agent, so every page outline starts by reminding the model that page content is untrusted and only your instructions count.
+Pages read through the browser lane are also processed on your computer before they go to the caller. By default the agent browser carries no sign-ins; with Keep website sign-ins on, the agent can read and operate the sites you signed in to in the DSH browser. With Connect browser on and a connection allowed, the agent can read and operate every site signed in to in that browser, so turn it on only when needed, and you can turn remote debugging off in the browser afterwards. Page text can also carry instructions aimed at the agent, so every page outline starts by reminding the model that page content is untrusted and only your instructions count.
+
+The settings page reads this plugin’s `latest` from npm (registry.npmjs.org) and checks the installed package through the local DSH plugin market. The npm request uses the package name.
+
+The diagnostics file from Report a problem stays on your computer until you drag it onto an issue page; 8.4 lists what it holds.
 
 ### 10. Documentation and development
 
@@ -668,7 +746,7 @@ npm ci
 npm test
 ```
 
-The standalone MCP server needs no third-party packages at runtime. Inside DSH, it uses DSH's own Schemastery and the official MCP bridge. Development dependencies are only for testing. `npm test` runs **54 isolated regression suites** covering settings compatibility, takeover and stopping, the progress overlay, reading controls, capture, OCR protocols, input edge cases, batch actions and the browser lane. It sends no real keyboard or mouse input and does not touch your installed DSH profiles. Tests that need a real interface use only their own test windows and temporary browser profiles, and logs go to the temporary folder the command prints.
+The standalone MCP server needs no third-party packages at runtime. Inside DSH, it uses DSH's own Schemastery and the official MCP bridge. Development dependencies are only for testing. `npm test` runs **88 isolated regression suites** covering settings compatibility, takeover and stopping, the progress overlay, reading controls, capture, OCR protocols, input edge cases, batch actions and the browser lane. It sends no real keyboard or mouse input and does not touch your installed DSH profiles. Tests that need a real interface use only their own test windows and temporary browser profiles, and logs go to the temporary folder the command prints.
 
 `node test/notepad-e2e.mjs` is a separate test that really types. It opens Notepad, so run it on a dedicated test desktop.
 

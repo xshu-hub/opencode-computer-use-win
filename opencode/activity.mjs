@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { atomicJson } from '../mcp/takeover.mjs';
 import { actionLabel } from '../mcp/activity.mjs';
-import { isQuietCall } from '../mcp/browser.mjs';
+import { isQuietCall } from '../mcp/catalog.mjs';
 import { createProgressSummarizer } from '../mcp/progress-summary.mjs';
 import { DesktopLock } from './desktop-lock.mjs';
 

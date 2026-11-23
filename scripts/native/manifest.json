@@ -1,0 +1,27 @@
+{
+    "schemaVersion":  1,
+    "version":  "0.2.0",
+    "runtime":  "netfx-clr4",
+    "helpers":  {
+                    "native":  {
+                                   "file":  "wcu-native-netfx.dll",
+                                   "sourceHash":  "24ea43fe6bcc6432",
+                                   "sha256":  "b4962a1c2bf26f4fbfbd546e4a59272eef8cbf1d2ecab8af8dfe4c64dc88ab7c"
+                               },
+                    "ocr":  {
+                                "file":  "wcu-ocr-netfx.dll",
+                                "sourceHash":  "4be4c00822f73e47",
+                                "sha256":  "87c81eb3672e66eb9476a9650b2af2d490a42b4633a683350a95377801a34144"
+                            },
+                    "clipboard":  {
+                                      "file":  "wcu-clipboard-netfx.dll",
+                                      "sourceHash":  "2549f15ffe4931db",
+                                      "sha256":  "260b9d63aee0c6cc3b354ae6ff8754d0f4db43902d3e212e98c5f0aa2577f47f"
+                                  },
+                    "takeover":  {
+                                     "file":  "wcu-takeover-netfx.dll",
+                                     "sourceHash":  "56ad069416162bb7",
+                                     "sha256":  "00f31d913a0b62b3f0fc529899d742836ebfd014cf77ea21aba8dd19b4194691"
+                                 }
+                }
+}
